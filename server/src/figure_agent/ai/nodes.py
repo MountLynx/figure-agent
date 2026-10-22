@@ -130,11 +130,13 @@ def make_merge_wb(fdir: Path):
         rounds = max(view.state.get("rounds", 0), (verify or {}).get("rounds", 0))
         view.state["rounds"] = rounds
         cleared = (not ops) or bool((verify or {}).get("cleared"))
+        remaining = (verify or {}).get("remaining", len(ops))
         try:
             code = (fdir / "plot.py").read_text(encoding="utf-8")
         except OSError:
             code = ""
-        return {"ops": ops, "verify": verify, "code": code, "rounds": rounds, "cleared": cleared}
+        return {"ops": ops, "verify": verify, "code": code, "rounds": rounds,
+                "cleared": cleared, "remaining": remaining}
 
     return merge_wb
 

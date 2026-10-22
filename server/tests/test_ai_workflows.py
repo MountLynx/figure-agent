@@ -114,6 +114,7 @@ def test_writeback_converges(tmp_path):
         "writeback", store, "p", "f", {}, llm_client=stub,
     ))
     assert result["ok"] is True and result["cleared"] is True, result
+    assert result["remaining"] == 0
     assert store.read_patch("p", "f")["ops"] == []
 
 
@@ -126,3 +127,60 @@ def test_writeback_no_ops_short_circuit(tmp_path):
     ))
     assert result["ok"] is True and result["cleared"] is True
     assert stub.prompts == []  # 未花任何 LLM 调用
+
+
+def test_adapt_end_to_end(tmp_path):
+    store = make_store(tmp_path)
+    fdir = store.figure_dir("p", "f")
+    orig = (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots(figsize=(4, 3))\n"
+        'ax.plot([0, 5, 10], [1, 2, 3], color="red")\n'
+        'ax.set_title("old")\n'
+    )
+    (fdir / "uploads" / "orig_plot.py").write_text(orig, encoding="utf-8")
+    stub = StubLLM({
+        "数据标准化": [STD_REPLY],
+        "绘图脚本改造器": [json.dumps({"code": GOOD_CODE, "notes": "改造完成"})],
+    })
+    result = asyncio.run(run_workflow(
+        "adapt", store, "p", "f",
+        {"requirements": "", "upload_name": "d.csv", "script_text": orig},
+        llm_client=stub,
+    ))
+    assert result["ok"] is True, result
+    assert "fa:response-curve" in store.read_svg("p", "f", "base")
+    runs = [json.loads(x) for x in (fdir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()]
+    assert runs[-1]["kind"] == "adapt" and runs[-1]["ok"] is True
+
+
+def test_edit_end_to_end(tmp_path):
+    store = make_store(tmp_path)
+    store.write_code("p", "f", GOOD_CODE)
+    stub = StubLLM({"绘图代码修改器": [json.dumps({"code": GOOD_CODE, "notes": "ok"})]})
+    result = asyncio.run(run_workflow(
+        "edit", store, "p", "f",
+        {"instruction": "改色", "selection_json": "[]", "code": GOOD_CODE},
+        llm_client=stub,
+    ))
+    assert result["ok"] is True and result["rounds"] == 1, result
+
+
+def test_writeback_max_rounds(tmp_path):
+    """永不收敛的 op：MAX_ROUNDS 轮后终止，ok=False，LLM 恰好调 3 次。"""
+    store = make_store(tmp_path)
+    store.write_code("p", "f", GOOD_CODE)
+    store.save_patch("p", "f", {
+        "baseHash": "",
+        "ops": [{"id": "op-1", "kind": "set_style", "target": {"id": "fa:nonexistent"},
+                 "attr": "fill", "value": "#ff0000", "intent": "改色", "origin": "manual",
+                 "status": "active"}],
+    })
+    stub = StubLLM({"微调回写器": [json.dumps({"code": GOOD_CODE, "notes": "原样"})] * 3})
+    result = asyncio.run(run_workflow(
+        "writeback", store, "p", "f", {}, llm_client=stub,
+    ))
+    assert result["ok"] is False and result["cleared"] is False, result
+    assert result["rounds"] == 3
+    assert len(stub.prompts) == 3
+    assert len(store.read_patch("p", "f")["ops"]) == 1  # op 保留给 patch 覆盖层

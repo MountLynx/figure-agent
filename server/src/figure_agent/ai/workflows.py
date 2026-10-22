@@ -3,7 +3,7 @@
 每次 run 构建全新 HarnessRegistry（body 按 {module_id}:{key} 命名空间隔离，
 view.state 随 run 隔离）。review_harness=None 跳过一致性审核——固定管线，
 省一次 LLM 调用。persist=False 全内存零落盘；审计靠 Finalize 节点写 runs.jsonl。
-同一时刻只允许一个 AI run（模块级 asyncio.Lock）。
+同一事件循环内只允许一个 AI run（per-loop asyncio.Lock 注册表）。
 
 图结构备注（均经真实引擎仿真验证）：
 - RenderValidate 双 producer（GenCode/EditCode + FixCode）必须 OR join，否则死锁
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import weakref
 from datetime import datetime
 
 from module_harness import (
@@ -39,7 +40,18 @@ from ..store import Store
 from . import nodes, prompts
 from .llm import get_llm
 
-_run_lock = asyncio.Lock()
+# 每事件循环一把锁：asyncio.Lock 一旦竞争即绑定首个 loop 且永久失效，
+# 测试的 asyncio.run（每次新 loop）与生产 uvicorn 主 loop 互不污染。
+_run_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _get_run_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _run_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _run_locks[loop] = lock
+    return lock
 
 
 def _hc(core: str) -> HarnessConfig:
@@ -255,31 +267,33 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
     """执行一条工作流，返回 Finalize 节点的规范化结果。"""
     if kind not in TASKLISTS:
         raise ValueError(f"未知工作流：{kind}")
-    async with _run_lock:
-        run_id = f"{kind}_{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:4]}"
-        client = llm_client or get_llm()
-        bus = EventBus()
-        _bridge(project, figure, run_id, bus)
-        reg = build_registry(kind, store, project, figure, spec, client, bus)
-        module = Module(
-            spec=spec,
-            tasklist=TASKLISTS[kind](spec),
-            llm_client=client,
-            event_bus=bus,
-            registry=reg,
-            module_id=run_id,
-            persist=False,
-            status_file=False,
-            keep_records=False,
-            stream_log=False,
-            control=False,
-            review_harness=None,
-        )
+    async with _get_run_lock():
+        run_id = f"{kind}_{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:8]}"
         from ..events import hub
 
         hub.broadcast_threadsafe({"type": "ai_run", "project": project, "figure": figure,
                                   "runId": run_id, "phase": "run_start", "node": kind})
         try:
+            # get_llm/build_registry/Module 构造也在罩内：配置错误等构建期
+            # 异常同样走统一失败出口，且必发 run_end（不裸逃逸成 500）
+            client = llm_client or get_llm()
+            bus = EventBus()
+            _bridge(project, figure, run_id, bus)
+            reg = build_registry(kind, store, project, figure, spec, client, bus)
+            module = Module(
+                spec=spec,
+                tasklist=TASKLISTS[kind](spec),
+                llm_client=client,
+                event_bus=bus,
+                registry=reg,
+                module_id=run_id,
+                persist=False,
+                status_file=False,
+                keep_records=False,
+                stream_log=False,
+                control=False,
+                review_harness=None,
+            )
             firings = await module.run(max_ticks=60)
             result = _final_output(firings)
             if not result:

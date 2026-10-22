@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import List
 
 from fastapi import WebSocket
+
+log = logging.getLogger(__name__)
 
 
 class Hub:
@@ -38,7 +41,18 @@ class Hub:
         except RuntimeError:
             loop = None
         if loop is not None:
-            asyncio.create_task(self.broadcast(event))
+            # fire-and-forget 任务持强引用（done 后自清），防中途被 GC 回收
+            task = asyncio.create_task(self.broadcast(event))
+            _bg_tasks.add(task)
+            task.add_done_callback(_bg_tasks.discard)
+        else:
+            log.warning(
+                "broadcast_threadsafe 在无事件循环线程被调用，事件丢弃: %s",
+                event.get("type"),
+            )
 
+
+# broadcast 后台任务引用集（仅防 GC，不参与生命周期管理）
+_bg_tasks: set = set()
 
 hub = Hub()

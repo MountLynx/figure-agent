@@ -168,7 +168,10 @@ class Store:
         fdir = self.figure_dir(project, figure)
         if fdir.exists():
             raise ValueError(f"图已存在：{project}/{figure}")
-        fdir.mkdir(parents=True)
+        try:
+            fdir.mkdir(parents=True)
+        except FileExistsError:  # TOCTOU：exists 检查与建目录之间的竞争
+            raise ValueError(f"图已存在：{project}/{figure}")
         (fdir / "history").mkdir()
         self._write_meta(
             fdir,
