@@ -2,18 +2,26 @@
 
 每次 run 构建全新 HarnessRegistry（body 按 {module_id}:{key} 命名空间隔离，
 view.state 随 run 隔离）。review_harness=None 跳过一致性审核——固定管线，
-省一次 LLM 调用。persist=False 全内存零落盘；审计靠 Finalize 节点写 runs.jsonl。
+省一次 LLM 调用。persist=False 全内存零落盘；审计靠 Finalize 节点写 runs.jsonl
+（Finalize 未 fire 的引擎级失败由 _audit_failure 补写，形状一致）。
 同一事件循环内只允许一个 AI run（per-loop asyncio.Lock 注册表）。
 
 图结构备注（均经真实引擎仿真验证）：
 - RenderValidate 双 producer（GenCode/EditCode + FixCode）必须 OR join，否则死锁
 - Finalize 经具名 bind inputs={"result": 上游} 读输入（NodeView 无 .output 属性）
 - writeback 的 Finalize 只从 Merge 的 wb_done 边进入（直达边会造成双 fire 双重审计）
+
+spec §12 的部分实现：五个代码 harness 设 validate_retries=1，引擎层修复链
+（围栏剥离→JSON 提取→尾部截断→带校验错误反馈重试一次）挡住"LLM 忘了去
+markdown 围栏"这类最常见坏输出；把坏 JSON 送进 fix 循环的完整实现需重构输出
+通道，留待真实 LLM smoke 后评估。残余引擎级失败由 _harvest_failure 收割
+具体 stderr（不泛化）、经 _audit_failure 落 runs.jsonl，可见可审计。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 import weakref
 from datetime import datetime
@@ -36,7 +44,7 @@ from module_harness.infra.events import (
     ScriptStarted,
 )
 
-from ..store import Store
+from ..store import Store, now_iso
 from . import nodes, prompts
 from .llm import get_llm
 
@@ -55,10 +63,16 @@ def _get_run_lock() -> asyncio.Lock:
 
 
 def _hc(core: str) -> HarnessConfig:
-    """代码类 harness 统一配置：核心 prompt + 契约文本 + JSON 输出。"""
+    """代码类 harness 统一配置：核心 prompt + 契约文本 + JSON 输出。
+
+    validate_retries=1：SpecModule 内置修复链（围栏剥离→JSON 提取→尾部
+    截断→带校验错误反馈重试一次），把"LLM 忘了去 markdown 围栏"挡在引擎层
+    ——spec §12 完整 fix-loop 化的部分实现，其余留待真实 smoke 后评估。
+    """
     return HarnessConfig(
         prompt_core=core + "\n\n" + prompts.CONTRACT,
         output_format=OutputFormat(type="json_object"),
+        validate_retries=1,
     )
 
 
@@ -262,6 +276,38 @@ def _final_output(firings: list) -> dict:
     return {}
 
 
+def _harvest_failure(firings: list) -> str:
+    """引擎级失败收割：反向扫 firings，取最后一个 failed 节点的具体错误。
+
+    NodeState 实测字段（vars 探明）：status='ok'|'failed'、error=str，
+    output 可为 Failure(error=..., type=...)。LLM 输出校验失败等引擎级
+    Failure 会让下游全部跳过、run 提前结束——Finalize 不 fire，具体原因
+    只能从这里收，否则 HTTP 结果与审计都只剩泛化文案。
+    """
+    for f in reversed(firings):
+        if getattr(f, "status", "") != "failed":
+            continue
+        err = getattr(f, "error", None)
+        if not err:
+            err = getattr(getattr(f, "output", None), "error", None)
+        return f"节点 {getattr(f, 'node', '?')} 失败：{err or '未知错误'}"
+    return ""
+
+
+def _audit_failure(store: Store, project: str, figure: str,
+                   kind: str, stderr: str) -> None:
+    """Finalize 未 fire 的失败补写 runs.jsonl（entry 形状与 nodes.finalize 一致）。"""
+    entry = {
+        "at": now_iso(), "kind": kind, "ok": False, "rounds": 0,
+        "stderr": stderr, "error_line": None, "notes": "",
+    }
+    try:
+        with (store.figure_dir(project, figure) / "runs.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 async def run_workflow(kind: str, store: Store, project: str, figure: str,
                        spec: dict, llm_client=None) -> dict:
     """执行一条工作流，返回 Finalize 节点的规范化结果。"""
@@ -273,6 +319,7 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
 
         hub.broadcast_threadsafe({"type": "ai_run", "project": project, "figure": figure,
                                   "runId": run_id, "phase": "run_start", "node": kind})
+        finalized = False  # Finalize 是否亲自落过审计（防双写）
         try:
             # get_llm/build_registry/Module 构造也在罩内：配置错误等构建期
             # 异常同样走统一失败出口，且必发 run_end（不裸逃逸成 500）
@@ -296,10 +343,16 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
             )
             firings = await module.run(max_ticks=60)
             result = _final_output(firings)
+            finalized = bool(result)
             if not result:
-                result = {"kind": kind, "ok": False, "rounds": 0, "stderr": "工作流未到达终点节点"}
+                # Finalize 未 fire（引擎级 Failure 饿死下游）：收割具体原因
+                detail = _harvest_failure(firings)
+                result = {"kind": kind, "ok": False, "rounds": 0,
+                          "stderr": detail or "工作流未到达终点节点"}
         except Exception as exc:  # LLM/构建错误统一失败出口
             result = {"kind": kind, "ok": False, "rounds": 0, "stderr": f"{type(exc).__name__}: {exc}"}
+        if not finalized:
+            _audit_failure(store, project, figure, kind, result.get("stderr") or "")
         hub.broadcast_threadsafe({"type": "ai_run", "project": project, "figure": figure,
                                   "runId": run_id, "phase": "run_end", "node": kind,
                                   "ok": result.get("ok"), "detail": (result.get("stderr") or "")[:300]})

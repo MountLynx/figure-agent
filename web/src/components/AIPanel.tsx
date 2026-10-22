@@ -100,7 +100,11 @@ export function AIPanel(props: Props) {
     try {
       const r = await api.writebackPatch(current.project, current.figure);
       showToast(
-        r.cleared ? "patch 已收敛清空" : `回写未收敛：剩余 ${r.remaining} 个 op`,
+        r.cleared
+          ? "patch 已收敛清空"
+          : (r.remaining ?? -1) < 0
+            ? "回写未收敛"
+            : `回写未收敛：剩余 ${r.remaining} 个 op`,
         !r.cleared
       );
     } catch (e) {

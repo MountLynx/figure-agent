@@ -184,3 +184,25 @@ def test_writeback_max_rounds(tmp_path):
     assert result["rounds"] == 3
     assert len(stub.prompts) == 3
     assert len(store.read_patch("p", "f")["ops"]) == 1  # op 保留给 patch 覆盖层
+
+
+def test_create_bad_json_failure_audited(tmp_path):
+    """LLM 持续回无效 JSON：引擎级 Failure 饿死下游、Finalize 不 fire——
+    stderr 必须收割出具体失败节点与原因（非泛化文案），并补写 runs.jsonl。
+    路由给两条坏回复：validate_retries=1 会先重试一次，单条坏回复会被
+    StubLLM 的 "{}" 兜底救活，到不了收割路径。"""
+    store = make_store(tmp_path)
+    stub = StubLLM({"数据标准化": ["这不是JSON", "还不是JSON"], "绘图代码生成器": []})
+    result = asyncio.run(run_workflow(
+        "create", store, "p", "f",
+        {"requirements": "画剂量响应曲线", "upload_name": "d.csv"},
+        llm_client=stub,
+    ))
+    assert result["ok"] is False, result
+    assert "未到达终点节点" not in result["stderr"]
+    assert "失败" in result["stderr"], result  # 形如「节点 Standardize 失败：输出格式校验失败：…」
+    lines = (store.figure_dir("p", "f") / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["kind"] == "create" and entry["ok"] is False
+    assert "失败" in entry["stderr"]
