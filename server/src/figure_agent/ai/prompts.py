@@ -13,8 +13,9 @@ RENDER_CONTRACT = """\
 ## 渲染契约（必须遵守）
 1. 模块级构建图形并存入变量 fig，例如 `fig, ax = plt.subplots(...)`；服务端执行后取 fig 存为 SVG。
 2. 不要调用 plt.show()。
-3. 不要设置 plt.rcParams["svg.fonttype"] 与 ["svg.hashsalt"]（服务端强制，覆盖会被改回）。
-4. 结尾调用 fig.tight_layout()（如适用）。"""
+3. 渲染后端已由服务端预设（Agg），不要调用 matplotlib.use。
+4. 不要设置 plt.rcParams["svg.fonttype"] 与 ["svg.hashsalt"]（服务端强制，覆盖会被改回）。
+5. 结尾调用 fig.tight_layout()（如适用）。"""
 
 GID_CONVENTION = """\
 ## gid 约定（必须遵守）
