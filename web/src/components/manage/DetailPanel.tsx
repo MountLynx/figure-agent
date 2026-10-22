@@ -22,7 +22,9 @@ export function DetailPanel(props: Props) {
 
   useEffect(() => {
     setProps(item?.properties ?? {});
-  }, [item?.id, item?.properties]);
+    // 仅在切换条目时同步：refresh（绑定/解绑等）不应冲掉未保存的属性输入
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item?.id]);
 
   if (!item) {
     return (

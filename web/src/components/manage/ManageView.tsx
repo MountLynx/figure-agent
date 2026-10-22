@@ -1,6 +1,6 @@
 // 管理视图：Index 风格三栏（左分组+标签 / 中图列表 / 右详情·类型）+ 顶栏。
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { FileInfo, GroupInfo, ItemInfo, TagInfo, TypeInfo } from "../../types";
 import { CreateDialog } from "./CreateDialog";
@@ -33,8 +33,12 @@ export function ManageView({ onOpen }: Props) {
     window.setTimeout(() => setToast(null), 2600);
   }, []);
 
+  const reqSeq = useRef(0);
   const refresh = useCallback(() => {
-    api.listItems({ q, groupId, tagId }).then(setItems).catch(() => undefined);
+    const seq = ++reqSeq.current;
+    api.listItems({ q, groupId, tagId }).then((list) => {
+      if (seq === reqSeq.current) setItems(list);
+    }).catch(() => undefined);
   }, [q, groupId, tagId]);
 
   const refreshMeta = useCallback(() => {
@@ -60,8 +64,16 @@ export function ManageView({ onOpen }: Props) {
       setFiles([]);
       return;
     }
-    api.listFiles(selected).then(setFiles).catch(() => setFiles([]));
-  }, [selected, items]);
+    let stale = false;
+    api.listFiles(selected).then((f) => {
+      if (!stale) setFiles(f);
+    }).catch(() => {
+      if (!stale) setFiles([]);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [selected]);
 
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
@@ -93,7 +105,13 @@ export function ManageView({ onOpen }: Props) {
         onCreateGroup={(name, parentId) =>
           api.createGroup({ name, parentId }).then(refreshMeta).then(refresh)}
         onRenameGroup={(id, name) => api.updateGroup(id, { name }).then(refreshMeta)}
-        onDeleteGroup={(id) => api.deleteGroup(id).then(refreshMeta).then(refresh)}
+        onDeleteGroup={(id) =>
+          api.deleteGroup(id)
+            .then(refreshMeta)
+            .then(() => {
+              if (groupId === id) setGroupId(null);
+              return refresh();
+            })}
         onDropItem={(itemId, gid) =>
           api.bindItemGroup(itemId, gid).then(refresh).then(() => showToast("已移入分组"))}
         onCreateTag={(name) => api.createTag({ name }).then(refreshMeta)}
