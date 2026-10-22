@@ -74,6 +74,15 @@ def test_existing_items_without_ledger_rejected(tmp_path):
         Repo(ws).open_or_init()
 
 
+def test_truncated_ledger_rejected(tmp_path):
+    repo = Repo(tmp_path / "ws")
+    repo.open_or_init()
+    with repo.conn() as c:
+        c.execute("DELETE FROM _sqlx_migrations WHERE version > 20260711000004")
+    with pytest.raises(RuntimeError, match="不完整"):
+        Repo(tmp_path / "ws").open_or_init()
+
+
 def test_tolerates_unknown_columns(tmp_path):
     repo = Repo(tmp_path / "ws")
     repo.open_or_init()

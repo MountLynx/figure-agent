@@ -51,14 +51,39 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _run_file(conn: sqlite3.Connection, fname: str) -> None:
-    conn.executescript((MIGRATIONS_DIR / fname).read_text(encoding="utf-8"))
+def _apply(
+    conn: sqlite3.Connection, fname: str, ledger_insert_sql: str, ledger_params: tuple
+) -> None:
+    """原子应用一个迁移：BEGIN + 迁移脚本 + 账本 INSERT 同事务 COMMIT（对齐
+    sqlx apply() 的打包语义），任一步失败则 ROLLBACK——杜绝「迁移已应用但
+    未记账」（下次打开误判 no-op，仓库永久损坏）或反向的「已记账未应用」。
+    executescript 会先提交挂起事务，而脚本内的显式 BEGIN 使事务在脚本结束
+    后保持打开，由这里的 INSERT/COMMIT 接管。"""
+    try:
+        conn.executescript(
+            "BEGIN;\n" + (MIGRATIONS_DIR / fname).read_text(encoding="utf-8")
+        )
+        conn.execute(ledger_insert_sql, ledger_params)
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 def ensure_sqlx_schema(conn: sqlite3.Connection) -> None:
     """空库 → 依序执行 Index 原版迁移并写账本；已有账本 → no-op；
-    有业务表但无账本 → 拒绝（不是本工具创建的库）。"""
+    有业务表但无账本 → 拒绝（不是本工具创建的库）。
+
+    注：sqlx 的 list_applied_migrations 只读 (version, checksum) 两列，
+    installed_on/description 格式仅为展示——勿因时间戳格式不同而「修复」。
+    """
     if table_exists(conn, "_sqlx_migrations"):
+        count = conn.execute("SELECT COUNT(*) FROM _sqlx_migrations").fetchone()[0]
+        if count != len(INDEX_MIGRATIONS):
+            raise RuntimeError(
+                f"_sqlx_migrations 账本不完整：{count}/{len(INDEX_MIGRATIONS)} 条迁移记录，仓库可能已损坏"
+            )
         return
     if table_exists(conn, "items"):
         raise RuntimeError(
@@ -66,9 +91,10 @@ def ensure_sqlx_schema(conn: sqlite3.Connection) -> None:
         )
     conn.executescript(_SQLX_LEDGER_DDL)
     for version, description, fname in INDEX_MIGRATIONS:
-        _run_file(conn, fname)
         checksum = hashlib.sha384((MIGRATIONS_DIR / fname).read_bytes()).digest()
-        conn.execute(
+        _apply(
+            conn,
+            fname,
             "INSERT INTO _sqlx_migrations"
             " (version, description, installed_on, success, checksum, execution_time)"
             " VALUES (?, ?, ?, 1, ?, 0)",
@@ -85,8 +111,9 @@ def ensure_fa_schema(conn: sqlite3.Connection) -> None:
     for version, _description, fname in FA_MIGRATIONS:
         if version in applied:
             continue
-        _run_file(conn, fname)
-        conn.execute(
+        _apply(
+            conn,
+            fname,
             "INSERT INTO fa_schema_migrations (version, applied_at) VALUES (?, ?)",
             (version, _utc_now()),
         )
