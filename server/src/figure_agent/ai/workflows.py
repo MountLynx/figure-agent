@@ -204,10 +204,12 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
                    spec: dict, llm_client, bus: EventBus) -> HarnessRegistry:
     fdir = store.figure_dir(project, figure)
     reg = HarnessRegistry(llm_client=llm_client, event_bus=bus)
-    # standardize 产出 CSV，与渲染契约/gid/字体无关——用裸 config 不拼 CONTRACT
+    # standardize 产出 CSV，与渲染契约/gid/字体无关——用裸 config 不拼 CONTRACT；
+    # 但它同样吃任意 LLM 输出，修复链照配（终审遗留：唯一没有 validate_retries 的 harness）
     reg.harness("standardize", HarnessConfig(
         prompt_core=prompts.STANDARDIZE_CORE,
         output_format=OutputFormat(type="json_object"),
+        validate_retries=1,
     ))
     for name, core in (
         ("gen_code", prompts.GEN_CODE_CORE),

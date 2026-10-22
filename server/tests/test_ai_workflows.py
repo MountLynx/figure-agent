@@ -189,8 +189,9 @@ def test_writeback_max_rounds(tmp_path):
 def test_create_bad_json_failure_audited(tmp_path):
     """LLM 持续回无效 JSON：引擎级 Failure 饿死下游、Finalize 不 fire——
     stderr 必须收割出具体失败节点与原因（非泛化文案），并补写 runs.jsonl。
-    路由给两条坏回复：validate_retries=1 会先重试一次，单条坏回复会被
-    StubLLM 的 "{}" 兜底救活，到不了收割路径。"""
+    路由给两条坏回复：standardize 是裸 HarnessConfig（无 validate_retries，
+    默认 0），第一条坏回复即失败——第二条路由项不会被消费；恰好钉住
+    「失败收割」不依赖重试预算的语义。"""
     store = make_store(tmp_path)
     stub = StubLLM({"数据标准化": ["这不是JSON", "还不是JSON"], "绘图代码生成器": []})
     result = asyncio.run(run_workflow(
