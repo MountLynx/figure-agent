@@ -1,6 +1,6 @@
 """几何：路径取点、transform 矩阵、无渲染 bbox 估算。
 
-bbox 估算只服务两处：transform 类 patch 的收敛判定、以及 MCP 手写 patch
+bbox 估算只服务两处：transform 类 patch 的收敛判定、以及手动 patch
 缺 pre 时的兜底。浏览器里的选区 bbox 用真实 DOM（getBBox + CTM），不受
 这里的近似影响。
 """

@@ -1,20 +1,20 @@
 # figure-agent（科研图表绘制 Agent）
 
-本地 Web 应用 + MCP 工具：AI（ZCode）编写/修改 matplotlib 代码产出科研图表；浏览器里框选/点选 SVG 元素把"改哪里"变成结构化数据回传给 AI；颜色/字号/位置/大小四项手动微调记录为 patch，代码重跑不丢失，并可用收敛式回写把 patch 翻译回代码。
+本地 Web 应用：服务端内嵌 SpecModule 工作流，由 AI 编写/修改 matplotlib 代码产出科研图表；浏览器 AI 面板提交任务、实时查看事件时间线；框选/点选 SVG 元素把"改哪里"变成结构化数据回传给 AI；颜色/字号/位置/大小四项手动微调记录为 patch，代码重跑不丢失，并可用收敛式回写把 patch 翻译回代码。
 
-设计文档：`docs/specs/2026-10-16-figure-agent-design.md`
+设计文档：`docs/specs/2026-10-16-figure-agent-design.md`（v1 基础）、`docs/specs/2026-10-22-native-ai-workflow-design.md`（原生 AI 工作流）
 
 ## 架构
 
 ```
-ZCode (AI) ──MCP(stdio)── FastAPI 本地服务(8765) ──HTTP+WS── 浏览器前端
+浏览器前端 ──HTTP+WS── FastAPI 本地服务(8765) ──内嵌 SpecModule── LLM
                             │ subprocess
                      python plot.py → base.svg
 workspace/<project>/<figure>/{plot.py, base.svg, patch.json, meta.json, history/}
 ```
 
-- `server/` — Python 包 `figure_agent`：executor（渲染契约注入）、svgkit（规范化/语义组/身份匹配/patch 收敛，pytest 主战场）、REST API + WS、静态托管
-- `web/` — Vite + React + TS：viewer（viewBox 平移缩放、悬停高亮）、DragSelect 选区（完全包含判定）+ 语义归并、元素面板（显隐/绘制层级）、四项轻编辑、op 列表
+- `server/` — Python 包 `figure_agent`：executor（渲染契约注入）、svgkit（规范化/语义组/身份匹配/patch 收敛，pytest 主战场）、ai/（SpecModule 四工作流：harness=LLM 节点 / script=Store 薄包装）、REST API + WS、静态托管
+- `web/` — Vite + React + TS：viewer（viewBox 平移缩放、悬停高亮）、DragSelect 选区（完全包含判定）+ 语义归并、元素面板（显隐/绘制层级）、四项轻编辑、op 列表、AI 面板（四工作流提交 + 事件时间线 + 回写）
 - `server/templates/` — 建图模板（分组柱状图、iris 散点）
 - `workspace/demo/` — 示例项目（bar-groups + iris-scatter）
 
@@ -33,16 +33,24 @@ cd web && npm install && npm run build
 
 环境变量：`FA_WORKSPACE`（默认 `<repo>/workspace`）、`FA_PORT`（默认 8765）、`FA_RENDER_TIMEOUT`（默认 30s）。
 
-## ZCode / MCP 接入
+## AI 工作流
 
-仓库根的 `.mcp.json` 已注册 `figure-agent` MCP server（stdio，薄包装 REST）。工具集：
+AI 能力由 FastAPI 服务内嵌的 SpecModule 工作流提供（harness=LLM 节点 / script=Store 薄包装），前端 AI 面板提交任务并实时查看事件时间线。四条工作流：
 
-`fa_list_projects` `fa_list_figures` `fa_get_selection` `fa_get_figure` `fa_set_code` `fa_run` `fa_get_patch` `fa_set_patch` `fa_verify_patch`
+- **create**：数据 + 要求 → 从零造图
+- **adapt**：数据 + 已有脚本 → 改造适配
+- **edit**：选区 + 指令 → 定点改图
+- **writeback**：手动微调 patch → 循环翻译进代码直至收敛清空
 
-典型闭环（S1）：用户在浏览器选元素 → `fa_get_selection` 读定位 JSON → `fa_get_figure` 读代码 → `fa_set_code` 定点修改并重渲染。
-回写闭环（S3）：`fa_get_patch` → 改代码表达意图 → `fa_set_code` → `fa_verify_patch` → patch 清空即完成。
+绘图代码约定见 `AGENTS.md`（fa: gid、模块级 `fig` 变量、禁碰 svg.fonttype / svg.hashsalt）。
 
-绘图代码约定见 `AGENTS.md`（fa: gid、模块级 `fig` 变量、禁碰 svg.fonttype）。
+## LLM 配置
+
+仓库根放 `config.json` + `.env`（参考 `config.example.json`）；`FIGURE_AGENT_MOCK=1` 可免 key 冒烟。SpecModule 以本地可编辑方式安装（路径按本机调整）：
+
+```bash
+server\.venv\Scripts\pip install -e "C:\Users\xingy\Desktop\开发\SpecModule"
+```
 
 ## 操作说明（前端）
 
@@ -56,8 +64,8 @@ cd web && npm install && npm run build
 ## 测试
 
 ```bash
-cd server && .venv/Scripts/python -m pytest tests -q   # svgkit/executor/API 30 例
-cd web && npm test                                     # 语义归并/选区/预览 9 例
+cd server && .venv/Scripts/python -m pytest tests -q   # svgkit/executor/API/AI 工作流 62 例
+cd web && npm test                                     # 语义归并/选区/预览/AI 面板 27 例
 ```
 
 ## v1 明确不做

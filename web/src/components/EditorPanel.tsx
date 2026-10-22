@@ -396,7 +396,7 @@ export function EditorPanel(props: EditorPanelProps) {
           <button className="small" style={{ float: "right" }} disabled={!canUndo || busy} onClick={onUndo}>撤销</button>
           <button className="small" style={{ float: "right", marginRight: 4 }} disabled={!canRedo || busy} onClick={onRedo}>重做</button>
         </h3>
-        {dirty && <div className="dirty-banner">有未保存的修改。保存后服务端才会生成 final.svg（ZCode/MCP 才能看到）。</div>}
+        {dirty && <div className="dirty-banner">有未保存的修改。保存后服务端才会生成 final.svg。</div>}
         {ops.length === 0 && <div className="hint">还没有手动微调。微调以 patch 形式叠加在渲染结果上，代码重跑不丢失。</div>}
         {ops.map((op) => {
           const vr = lastVerify?.results.find((r) => r.opId === op.id);
@@ -431,7 +431,7 @@ export function EditorPanel(props: EditorPanelProps) {
           <div className="hint">
             {lastVerify.cleared
               ? "✅ patch 已收敛清空：所有微调都已表达进代码。"
-              : `剩余 ${lastVerify.remainingOps} 个 op 未收敛。在 ZCode 里说“把 patch 回写进代码”，或手动改代码后重跑。`}
+              : `剩余 ${lastVerify.remainingOps} 个 op 未收敛。在 AI 面板点“回写 patch”，或手动改代码后重跑。`}
           </div>
         )}
       </div>
@@ -465,7 +465,7 @@ export function EditorPanel(props: EditorPanelProps) {
       {/* 代码只读展示 */}
       <div className="section">
         <h3>
-          plot.py（只读，代码在 ZCode/编辑器里改）
+          plot.py（只读，代码在 AI 面板/编辑器里改）
           <button className="small" style={{ float: "right" }} onClick={() => setShowCode((v) => !v)}>
             {showCode ? "收起" : "展开"}
           </button>

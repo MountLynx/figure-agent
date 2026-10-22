@@ -284,7 +284,7 @@ export default function App() {
     (jsons: SelectionJSON[]) => {
       if (!current || jsons.length === 0) return;
       setSelectionPaths(jsons.map((j) => j.semanticPath));
-      // 单选保持对象形状（兼容服务端/MCP 旧契约），多选传数组
+      // 单选保持对象形状（兼容服务端旧契约），多选传数组
       const payload = jsons.length === 1 ? jsons[0] : jsons;
       api
         .enrichSelection(current.project, current.figure, payload)

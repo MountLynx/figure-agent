@@ -76,8 +76,7 @@ def test_verify_after_code_writeback(client):
          "attr": "fill", "value": "#dd3322", "intent": "改红", "origin": "manual", "status": "active"},
     ]}
     client.put("/api/figure/demo/bars2/patch", json=patch)
-    # 模拟 AI 回写：读代码 → 改色 → 写回
-    # （代码读取走 MCP 的 fa_get_figure；测试里直接读文件）
+    # 模拟 AI 回写：读代码 → 改色 → 写回（测试里直接读文件）
     from figure_agent.main import store
 
     code = store.read_code("demo", "bars2").replace('"#d08770"', '"#dd3322"')
