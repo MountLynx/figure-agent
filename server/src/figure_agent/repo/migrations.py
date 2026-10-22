@@ -64,11 +64,11 @@ def _apply(
             "BEGIN;\n" + (MIGRATIONS_DIR / fname).read_text(encoding="utf-8")
         )
         conn.execute(ledger_insert_sql, ledger_params)
+        conn.execute("COMMIT")
     except Exception:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    conn.execute("COMMIT")
 
 
 def ensure_sqlx_schema(conn: sqlite3.Connection) -> None:
@@ -80,10 +80,11 @@ def ensure_sqlx_schema(conn: sqlite3.Connection) -> None:
     """
     if table_exists(conn, "_sqlx_migrations"):
         count = conn.execute("SELECT COUNT(*) FROM _sqlx_migrations").fetchone()[0]
-        if count != len(INDEX_MIGRATIONS):
+        if count < len(INDEX_MIGRATIONS):
             raise RuntimeError(
                 f"_sqlx_migrations 账本不完整：{count}/{len(INDEX_MIGRATIONS)} 条迁移记录，仓库可能已损坏"
             )
+        # count > 8 = Index 应用未来升级过（更超集的账本）：按名取列宽容，放行
         return
     if table_exists(conn, "items"):
         raise RuntimeError(
