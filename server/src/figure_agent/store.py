@@ -161,6 +161,27 @@ class Store:
                 )
         return out
 
+    def init_figure(self, project: str, figure: str, origin: str) -> None:
+        """建图目录（无模板代码）：AI 造图/改造的入口。已存在则 ValueError。"""
+        _require_name(project, "项目")
+        _require_name(figure, "图")
+        fdir = self.figure_dir(project, figure)
+        if fdir.exists():
+            raise ValueError(f"图已存在：{project}/{figure}")
+        fdir.mkdir(parents=True)
+        (fdir / "history").mkdir()
+        self._write_meta(
+            fdir,
+            {
+                "name": figure,
+                "project": project,
+                "origin": origin,
+                "createdAt": now_iso(),
+                "lastRenderAt": None,
+            },
+        )
+        self._write_patch(fdir, {"baseHash": "", "ops": []})
+
     def create_figure(self, project: str, figure: str, template: str) -> Dict:
         _require_name(project, "项目")
         _require_name(figure, "图")
@@ -179,6 +200,7 @@ class Store:
                 "name": figure,
                 "project": project,
                 "template": template,
+                "origin": "template",
                 "createdAt": now_iso(),
                 "lastRenderAt": None,
             },

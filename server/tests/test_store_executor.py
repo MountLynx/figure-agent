@@ -115,6 +115,18 @@ def test_snapshot(store):
     assert snaps[0]["note"] == "初始版"
 
 
+def test_init_figure(tmp_path):
+    store = Store(tmp_path / "ws")
+    store.init_figure("p", "f", origin="ai")
+    fdir = store.figure_dir("p", "f")
+    assert (fdir / "meta.json").exists()
+    meta = store.read_meta("p", "f")
+    assert meta["origin"] == "ai" and meta["lastRenderAt"] is None
+    assert store.read_patch("p", "f") == {"baseHash": "", "ops": []}
+    with pytest.raises(ValueError):
+        store.init_figure("p", "f", origin="ai")
+
+
 def test_create_figure_rejects_bad_names(store):
     with pytest.raises(ValueError):
         store.create_figure("p", "../evil", "bar-groups")
