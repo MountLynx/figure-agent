@@ -72,3 +72,36 @@ def test_migrate_archive_keeps_backup(tmp_path):
 def test_migrate_no_old_structure(tmp_path):
     (tmp_path / "ws").mkdir()
     assert migrate_workspace(tmp_path / "ws")["skipped"] == "未发现旧式 <项目>/<图>/ 结构"
+
+
+def test_migrate_runs_jsonl_tolerant(tmp_path):
+    """坏 JSON 行跳过、缺 at 落默认、detail 只收 stderr/error_line/notes。"""
+    root = tmp_path / "ws"
+    fig = root / "demo" / "bars"
+    fig.mkdir(parents=True)
+    (fig / "meta.json").write_text(json.dumps({"name": "bars", "origin": "ai"}), encoding="utf-8")
+    (fig / "plot.py").write_text("x = 1\n", encoding="utf-8")
+    (fig / "runs.jsonl").write_text(
+        json.dumps({"at": "2026-01-01T00:00:00", "kind": "create", "ok": True,
+                    "rounds": 2, "stderr": "e", "error_line": 3, "notes": "n"}) + "\n"
+        + "这不是JSON\n"
+        + json.dumps({"kind": "adapt"}) + "\n",
+        encoding="utf-8",
+    )
+    summary = migrate_workspace(root)
+    repo = Repo(root)
+    runs = repo_runs.list_runs(repo, summary["migrated"][0]["id"])
+    assert len(runs) == 2  # 坏行跳过
+    assert runs[0]["kind"] == "adapt" and runs[0]["ok"] is False and runs[0]["rounds"] == 0
+    assert runs[1]["kind"] == "create" and runs[1]["stderr"] == "e"
+    assert "at" in runs[0] and "at" in runs[1]  # 缺 at 落了默认时间戳
+
+
+def test_migrate_keeps_nonempty_project_dir(tmp_path):
+    """stray 文件留存 → 非 archive 模式不删项目目录。"""
+    root = tmp_path / "ws"
+    _old_workspace(root)
+    (root / "demo" / "leftover.txt").write_text("keep me", encoding="utf-8")
+    summary = migrate_workspace(root)
+    assert len(summary["migrated"]) == 1
+    assert (root / "demo" / "leftover.txt").exists()  # 目录未被 rmdir

@@ -1,7 +1,9 @@
 """一次性迁移：旧 workspace/<项目>/<图>/ → Index 仓库（扁平哈希 + index.db）。
 
 用法：python -m figure_agent migrate [--archive]
-幂等：已有 .index 即跳过；迁移过程中逐项检查，重跑无副作用。
+幂等：已有 .index 即跳过，重跑无副作用。注意 .index 在首个条目迁移前就
+会创建——若迁移中途失败，重跑只会报「已是 Index 仓库」，半迁条目需手工
+处理（或删 .index 重建后重跑）。
 """
 
 from __future__ import annotations
