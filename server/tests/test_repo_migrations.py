@@ -24,6 +24,7 @@ EXPECTED_SHA384 = {
 
 
 def test_migration_files_byte_identical():
+    assert {p.name for p in MIGRATIONS_DIR.glob("*.sql")} == set(EXPECTED_SHA384) | {"000001_fa_ext.sql"}
     for fname, hexdigest in EXPECTED_SHA384.items():
         assert hashlib.sha384((MIGRATIONS_DIR / fname).read_bytes()).hexdigest() == hexdigest, fname
 
