@@ -483,7 +483,8 @@ def now_utc() -> str:
 
 
 def require_id(item_id: str) -> str:
-    if not ID_RE.match(item_id or ""):
+    # fullmatch 而非 match：Python 的 `$` 容忍尾换行（"aaaaaaaaaaaa\n" 会溜过）
+    if not ID_RE.fullmatch(item_id or ""):
         raise ValueError(f"非法条目 id：{item_id!r}")
     return item_id
 
