@@ -102,3 +102,25 @@ def test_verify_after_code_writeback(client):
     assert r.json()["ok"] is True
     v = client.post("/api/figure/demo/bars2/verify-patch").json()
     assert v["cleared"] is True, v
+
+
+def test_multiselect_session(client):
+    """多选：POST 数组 → 每个元素各自富化；GET/f MCP 读到完整数组。"""
+    client.post("/api/projects/demo/figures", json={"name": "bars3", "template": "bar-groups"})
+    r = client.post(
+        "/api/session/selection",
+        json={
+            "project": "demo",
+            "figure": "bars3",
+            "selection": [{"id": "fa:treatment-bar-1"}, {"id": "fa:treatment-bar-2"}],
+        },
+    )
+    sel = r.json()
+    assert isinstance(sel, list) and len(sel) == 2
+    assert [s["elementId"] for s in sel] == ["fa:treatment-bar-1", "fa:treatment-bar-2"]
+    assert all(s["fingerprint"].startswith("p:") for s in sel)
+    # 两条 JSON 各自独立描述自己的元素，不能是第一条的克隆
+    assert sel[0]["semanticPath"] != sel[1]["semanticPath"]
+
+    got = client.get("/api/session/selection").json()["selection"]
+    assert isinstance(got, list) and got[1]["elementId"] == "fa:treatment-bar-2"

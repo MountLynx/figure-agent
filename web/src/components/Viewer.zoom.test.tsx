@@ -49,7 +49,7 @@ function makeProps(over: Partial<Parameters<typeof Viewer>[0]> = {}): Parameters
     showBase: false,
     preciseMode: false,
     selectionPaths: [],
-    onSelection: (els: Element[], primary: SelectionJSON) => {},
+    onSelection: (jsons: SelectionJSON[]) => {},
     onClearSelection: () => {},
     version: 0,
     ...over,

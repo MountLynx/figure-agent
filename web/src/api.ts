@@ -69,7 +69,7 @@ export const api = {
       body: JSON.stringify({ note }),
     }).then((r) => json<{ id: string }>(r)),
 
-  pushSelection: (project: string, figure: string, selection: object) =>
+  pushSelection: (project: string, figure: string, selection: object | object[]) =>
     fetch("/api/session/selection", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

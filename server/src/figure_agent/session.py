@@ -14,9 +14,19 @@ _latest: Optional[Dict] = None
 _by_figure: Dict[tuple, Dict] = {}
 
 
-def save_selection(store: Store, project: str, figure: str, selection: dict) -> dict:
-    """富化并保存选区。富化失败时原样保存（带 warning）。"""
-    global _latest
+def save_selection(store: Store, project: str, figure: str, selection: dict | list[dict]) -> dict | list[dict]:
+    """富化并保存选区（多选时 selection 为数组，逐条富化）。富化失败时原样保存（带 warning）。"""
+    items = selection if isinstance(selection, list) else [selection]
+    enriched_items = [_enrich_one(store, project, figure, item) for item in items]
+    result: dict | list[dict] = enriched_items if isinstance(selection, list) else enriched_items[0]
+    with _lock:
+        global _latest
+        _latest = result
+        _by_figure[(project, figure)] = result
+    return result
+
+
+def _enrich_one(store: Store, project: str, figure: str, selection: dict) -> dict:
     enriched = dict(selection or {})
     enriched.setdefault("project", project)
     enriched.setdefault("figure", figure)
@@ -36,9 +46,6 @@ def save_selection(store: Store, project: str, figure: str, selection: dict) -> 
                 warnings.append("无法在当前 SVG 中定位选区元素（id 与语义路径均未命中）")
         except Exception as exc:  # 防御：选区富化失败不影响保存
             warnings.append(f"选区富化失败：{exc}")
-    with _lock:
-        _latest = enriched
-        _by_figure[(project, figure)] = enriched
     enriched["warnings"] = warnings
     return enriched
 

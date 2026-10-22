@@ -20,7 +20,8 @@ export interface ViewerProps {
   showBase: boolean;
   preciseMode: boolean;
   selectionPaths: string[];
-  onSelection: (els: Element[], primary: SelectionJSON) => void;
+  /** 每个选中元素一条选区 JSON（多选时每条独立描述自己的 bbox/style/text） */
+  onSelection: (jsons: SelectionJSON[]) => void;
   onClearSelection: () => void;
   version: number; // 图切换代数
   /** SVG DOM 重建/ops 应用后上报语义元素树（文档顺序，含隐藏态） */
@@ -309,7 +310,7 @@ export function Viewer(props: ViewerProps) {
     if (!el) return;
     const unit = selectionUnit(el);
     if (!unit) return;
-    cbSelRef.current.onSelection([unit], buildSelectionJson(unit, svg));
+    cbSelRef.current.onSelection([buildSelectionJson(unit, svg)]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectRequest?.nonce]);
 
@@ -338,7 +339,7 @@ export function Viewer(props: ViewerProps) {
       if (!s) return;
       const merged = mergeCollapse(items);
       if (merged.length === 0) return;
-      onSelection(merged, buildSelectionJson(merged[0], s));
+      onSelection(merged.map((el) => buildSelectionJson(el, s)));
     },
     [onSelection]
   );
@@ -368,10 +369,10 @@ export function Viewer(props: ViewerProps) {
           onClearSelection();
           return;
         }
-        onSelection(remaining, buildSelectionJson(remaining[0], s));
+        onSelection(remaining.map((el) => buildSelectionJson(el, s)));
         return;
       }
-      onSelection([unit], buildSelectionJson(unit, s));
+      onSelection([buildSelectionJson(unit, s)]);
     },
     [onSelection, onClearSelection, selectionPaths, selectedEls]
   );

@@ -305,7 +305,9 @@ export function EditorPanel(props: EditorPanelProps) {
             {primary.nearby && primary.nearby.length > 0 && <div>附近: {primary.nearby.slice(0, 3).join("；")}</div>}
             {primary.warnings && primary.warnings.length > 0 && <div className="sel-lost">{primary.warnings.join("；")}</div>}
             <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
-              <button className="small" onClick={onCopySelection}>复制选区 JSON</button>
+              <button className="small" onClick={onCopySelection}>
+                复制选区 JSON{selections.length > 1 ? `（${selections.length} 个）` : ""}
+              </button>
             </div>
           </div>
         )}

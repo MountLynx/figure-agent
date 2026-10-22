@@ -36,7 +36,8 @@ class CodePut(BaseModel):
 class SelectionPost(BaseModel):
     project: str
     figure: str
-    selection: dict = Field(default_factory=dict)
+    # 单选为对象（旧契约）；多选为对象数组
+    selection: dict | list[dict] = Field(default_factory=dict)
 
 
 class SnapshotPost(BaseModel):

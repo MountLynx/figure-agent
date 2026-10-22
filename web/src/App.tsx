@@ -259,16 +259,15 @@ export default function App() {
 
   // ---- 选区 ----
   const onSelection = useCallback(
-    (els: Element[], primary: SelectionJSON) => {
-      if (!current) return;
-      setSelectionPaths(els.map((el) => pathOf(el)));
+    (jsons: SelectionJSON[]) => {
+      if (!current || jsons.length === 0) return;
+      setSelectionPaths(jsons.map((j) => j.semanticPath));
+      // 单选保持对象形状（兼容服务端/MCP 旧契约），多选传数组
+      const payload = jsons.length === 1 ? jsons[0] : jsons;
       api
-        .pushSelection(current.project, current.figure, primary)
-        .then((enriched) => {
-          const rest = els.slice(1).map((el) => ({ ...primary, elementId: el.id, semanticPath: pathOf(el) }));
-          setSelections([enriched, ...rest]);
-        })
-        .catch(() => setSelections([primary]));
+        .pushSelection(current.project, current.figure, payload)
+        .then((enriched) => setSelections(Array.isArray(enriched) ? enriched : [enriched]))
+        .catch(() => setSelections(jsons));
     },
     [current]
   );
@@ -458,42 +457,20 @@ export default function App() {
         onExportSvg={exportSvg}
         onSnapshot={snapshot}
         onCopySelection={() => {
-          const s = selections[0];
-          if (s) navigator.clipboard.writeText(JSON.stringify(s, null, 2)).then(() => showToast("选区 JSON 已复制"));
+          if (selections.length === 0) return;
+          // 单选复制单个对象；多选复制数组，每条都是各自元素的完整 JSON
+          const payload = selections.length === 1 ? selections[0] : selections;
+          navigator.clipboard
+            .writeText(JSON.stringify(payload, null, 2))
+            .then(() =>
+              showToast(selections.length === 1 ? "选区 JSON 已复制" : `已复制 ${selections.length} 个元素的选区 JSON`)
+            );
         }}
       />
 
       {toast && <div className={`toast ${toast.error ? "error" : ""}`}>{toast.msg}</div>}
     </div>
   );
-}
-
-function pathOf(el: Element): string {
-  // 与 selection/semantics.ts 的 semanticPath 一致（此处仅用于 overlay 定位）
-  const parts: string[] = [];
-  let cur: Element | null = el;
-  while (cur) {
-    const parent: Element | null = cur.parentElement;
-    if (!parent || parent.tagName.toLowerCase() === "svg") {
-      parts.push(labelOfEl(cur));
-      break;
-    }
-    parts.push(labelOfEl(cur));
-    cur = parent;
-  }
-  return parts.reverse().join("/");
-}
-
-function labelOfEl(el: Element): string {
-  if (el.id) return el.id;
-  let i = 0;
-  let sib = el.previousElementSibling;
-  const tag = el.tagName.toLowerCase();
-  while (sib) {
-    if (sib.tagName.toLowerCase() === tag) i++;
-    sib = sib.previousElementSibling;
-  }
-  return `${tag}[${i + 1}]`;
 }
 
 function downloadBlob(blob: Blob, name: string) {
