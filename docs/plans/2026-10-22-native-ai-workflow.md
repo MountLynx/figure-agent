@@ -21,6 +21,7 @@
 | `reg.script("名")(fn)` | `registry.py:75` | fn(view) 支持同步与 async；`view.field("inputs键名")` 取 producer 最新输出（未点火抛 KeyError/TypeError，须 try/except）；`view.state` 是跨 tick 持久的节点级 dict（计轮数用）；`view.output` 是"最近触发的前驱"输出 |
 | `reg.guard("名", fn)` | `module_harness/model/submodule.py:131`（用法示例） | fn(view) -> bool；守卫边 `view.output` = 该边源节点输出。**互补守卫必须严格 XOR**，否则死等或双走 |
 | EventBus | `module_harness/infra/events.py` | `bus.subscribe(事件类, 回调)`；事件带 `.node`；`ScriptFailed.error`、`HarnessFailed.reason` |
+| harness 输出统一 `json_object`；prompt `{key}` 渲染：具名 bind → spec 常量 → 保留原样。dict 类 bind 以 Python repr 渲染（长代码会带 `\n` 转义）——已知取舍，真实 LLM smoke（Task 7）若发现修复质量差再引入序列化前置节点 |
 | `LLMConfig.from_env(project_root=...)` / `create_llm_client(cfg)` | `SpecModule/llm/config.py:168`、`llm/client.py` | 传 `project_root=figure_agent.config.REPO_ROOT` 使 figure-agent 根的 config.json/.env 生效；providers 为空抛 `ValueError`；`cfg.model` / `cfg.provider` |
 | `MockLLMClient` | `SpecModule/llm/mock.py` | `complete(**kw)->LLMResponse`；json_object 时返回 `{"result": "mock output", ...}`（内容是占位符，仅用于接线冒烟；工作流测试用自带 StubLLM） |
 | LLM 客户端协议 | `example/demo_loop.py:31` | `async complete(prompt=..., **kw) -> LLMResponse(content, usage, finish_reason)` |
@@ -596,7 +597,11 @@ def make_write_data(fdir: Path):
 
 
 def make_render_validate(store: Store, fdir: Path, project: str, figure: str):
-    """取代码（fix 优先于 gen）→ 写盘渲染 → {ok, rounds, stderr, ...}。"""
+    """取代码（fix 优先于 gen）→ 写盘渲染 → {ok, rounds, stderr, code, ...}。
+
+    返回值必须带 "code"（本轮实际渲染的代码）：FixCode 的 prompt 经 {render}
+    拿到整个 dict，没有 code 就无法修复（v2 计划评审补上的字段）。
+    """
 
     async def render_validate(view) -> dict:
         try:
@@ -617,7 +622,7 @@ def make_render_validate(store: Store, fdir: Path, project: str, figure: str):
         view.state["rounds"] = rounds
         if not (isinstance(code, str) and code.strip()):
             return {"ok": False, "rounds": rounds, "stderr": "上游未产出代码",
-                    "error_line": None, "source": source}
+                    "error_line": None, "source": source, "code": ""}
         outcome = await asyncio.to_thread(store.write_code, project, figure, code)
         return {
             "ok": outcome.ok,
@@ -626,6 +631,7 @@ def make_render_validate(store: Store, fdir: Path, project: str, figure: str):
             "error_line": outcome.error_line,
             "fa_count": len((outcome.stats or {}).get("faGroups", [])),
             "source": source,
+            "code": code,
         }
 
     return render_validate
@@ -912,9 +918,9 @@ def test_create_with_fix_loop(tmp_path):
     assert "fa:response-curve" in store.read_svg("p", "f", "base")
     runs = [json.loads(x) for x in (fdir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()]
     assert runs[-1]["kind"] == "create" and runs[-1]["ok"] is True
-    # fix_code 收到了 stderr
+    # fix_code 收到了 stderr 与完整当前代码（{render} 含 code 字段）
     fix_prompts = [p for p in stub.prompts if "绘图代码修复器" in p]
-    assert fix_prompts and "nope" in fix_prompts[0]
+    assert fix_prompts and "nope" in fix_prompts[0] and 'ax.plot' in fix_prompts[0]
 
 
 def test_writeback_converges(tmp_path):
@@ -1108,8 +1114,12 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
                    spec: dict, llm_client, bus: EventBus) -> HarnessRegistry:
     fdir = store.figure_dir(project, figure)
     reg = HarnessRegistry(llm_client=llm_client, event_bus=bus)
+    # standardize 产出 CSV，与渲染契约/gid/字体无关——用裸 config 不拼 CONTRACT
+    reg.harness("standardize", HarnessConfig(
+        prompt_core=prompts.STANDARDIZE_CORE,
+        output_format=OutputFormat(type="json_object"),
+    ))
     for name, core in (
-        ("standardize", prompts.STANDARDIZE_CORE),
         ("gen_code", prompts.GEN_CODE_CORE),
         ("adapt_code", prompts.ADAPT_CODE_CORE),
         ("fix_code", prompts.FIX_CODE_CORE),
