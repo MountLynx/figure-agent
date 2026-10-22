@@ -980,6 +980,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import weakref
 from datetime import datetime
 
 from module_harness import (
@@ -1004,7 +1005,19 @@ from ..store import Store
 from . import nodes, prompts
 from .llm import get_llm
 
-_run_lock = asyncio.Lock()
+# 同一时刻每事件循环一把运行锁（评审修正：模块级单锁在竞争时会绑定首个
+# loop 且永久失效——per-loop WeakKeyDictionary 对 asyncio.run 测试与生产主
+# loop 都安全）
+_run_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _get_run_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _run_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _run_locks[loop] = lock
+    return lock
 
 
 def _hc(core: str) -> HarnessConfig:
@@ -1033,9 +1046,15 @@ def _tl_create(spec: dict) -> Tasklist:
             "Finalize": TaskDefinition(type="script", script="finalize",
                                        inputs={"result": "RenderValidate"}),
         },
+        # tickflow 解析器不接受一行多跳边（_EDGE_RE 整行匹配单条边），
+        # flow 必须每行一条边——语义与设计图一致
         flow=(
-            "[ParseUpload] --> Standardize --> WriteData --> GenCode --> RenderValidate\n"
-            "RenderValidate --|needs_fix|--> FixCode --> RenderValidate\n"
+            "[ParseUpload] --> Standardize\n"
+            "Standardize --> WriteData\n"
+            "WriteData --> GenCode\n"
+            "GenCode --> RenderValidate\n"
+            "RenderValidate --|needs_fix|--> FixCode\n"
+            "FixCode --> RenderValidate\n"
             "RenderValidate --|settled|--> Finalize\n"
             # RenderValidate 双 producer（GenCode+FixCode）默认 AND join 会死锁：
             # 首轮 FixCode 未 fire 永不满足。OR join = 任一 producer fire 即触发。
@@ -1064,8 +1083,12 @@ def _tl_adapt(spec: dict) -> Tasklist:
                                        inputs={"result": "RenderValidate"}),
         },
         flow=(
-            "[ParseUpload] --> Standardize --> WriteData --> AdaptCode --> RenderValidate\n"
-            "RenderValidate --|needs_fix|--> FixCode --> RenderValidate\n"
+            "[ParseUpload] --> Standardize\n"
+            "Standardize --> WriteData\n"
+            "WriteData --> AdaptCode\n"
+            "AdaptCode --> RenderValidate\n"
+            "RenderValidate --|needs_fix|--> FixCode\n"
+            "FixCode --> RenderValidate\n"
             "RenderValidate --|settled|--> Finalize\n"
             "RenderValidate.join: OR"
         ),
@@ -1088,7 +1111,8 @@ def _tl_edit(spec: dict) -> Tasklist:
         },
         flow=(
             "[EditCode] --> RenderValidate\n"
-            "RenderValidate --|needs_fix|--> FixCode --> RenderValidate\n"
+            "RenderValidate --|needs_fix|--> FixCode\n"
+            "FixCode --> RenderValidate\n"
             "RenderValidate --|settled|--> Finalize\n"
             "RenderValidate.join: OR"
         ),
@@ -1146,7 +1170,7 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
     ):
         reg.harness(name, _hc(core))
 
-    reg.script("parse_upload")(nodes.make_parse_upload(fdir, spec["upload_name"]))
+    reg.script("parse_upload")(nodes.make_parse_upload(fdir, spec.get("upload_name", "")))
     reg.script("write_data")(nodes.make_write_data(fdir))
     reg.script("render_validate")(nodes.make_render_validate(store, fdir, project, figure))
     reg.script("read_patch")(nodes.make_read_patch(store, project, figure))
@@ -1207,7 +1231,7 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
     """执行一条工作流，返回 Finalize 节点的规范化结果。"""
     if kind not in TASKLISTS:
         raise ValueError(f"未知工作流：{kind}")
-    async with _run_lock:
+    async with _get_run_lock():
         run_id = f"{kind}_{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:4]}"
         client = llm_client or get_llm()
         bus = EventBus()
