@@ -10,11 +10,8 @@ vi.mock("../api", () => ({
   api: {
     aiStatus: () =>
       Promise.resolve({ configured: true, provider: "mock", model: "mock", mock: true }),
-    createFigureAi: vi.fn(() => Promise.resolve({ kind: "create", ok: true, rounds: 1, stderr: "" })),
-    adaptFigure: vi.fn(),
     instruct: vi.fn(),
     writebackPatch: vi.fn(),
-    enrichSelection: vi.fn(),
   },
 }));
 
@@ -23,8 +20,7 @@ describe("AIPanel", () => {
   let container: HTMLElement;
 
   const props = {
-    projects: [{ name: "demo", figures: [] }],
-    current: { project: "demo", figure: "f1" },
+    current: { id: "abc123def456", name: "f1" },
     selections: [],
     patchOpCount: 2,
     runEvents: [{ runId: "r1", phase: "run_end" as const, node: "create", ok: true, at: 0 }],
@@ -32,7 +28,6 @@ describe("AIPanel", () => {
     wsOnline: false,
     onRunStart: vi.fn(),
     onRunEnd: vi.fn(),
-    onFigureReady: vi.fn(),
     onFigureChanged: vi.fn(),
     showToast: vi.fn(),
   };
@@ -48,14 +43,13 @@ describe("AIPanel", () => {
     root = null;
   });
 
-  it("渲染状态徽标与造图表单，未选文件时生成按钮禁用", async () => {
+  it("渲染状态徽标，未输入指令时执行按钮禁用", async () => {
     render();
     await act(() => new Promise((r) => setTimeout(r, 0)));
     expect(container.textContent).toContain("mock");
-    expect(container.textContent).toContain("AI 造图");
     const buttons = [...container.querySelectorAll("button")];
-    const gen = buttons.find((b) => b.textContent === "生成图表")!;
-    expect(gen.disabled).toBe(true);
+    const exec = buttons.find((b) => b.textContent === "执行修改")!;
+    expect(exec.disabled).toBe(true);
   });
 
   it("显示运行时间线事件", async () => {
