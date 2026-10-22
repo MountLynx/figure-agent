@@ -5,7 +5,8 @@ import { api } from "./api";
 import { Viewer, type ElementNode } from "./components/Viewer";
 import { Sidebar } from "./components/Sidebar";
 import { EditorPanel } from "./components/EditorPanel";
-import type { FigureDetail, Op, ProjectInfo, SelectionJSON, TemplateInfo, VerifyResponse } from "./types";
+import { AIPanel } from "./components/AIPanel";
+import type { FigureDetail, Op, ProjectInfo, RunEvent, SelectionJSON, TemplateInfo, VerifyResponse } from "./types";
 
 interface HistoryEntry {
   ops: Op[];
@@ -32,6 +33,8 @@ export default function App() {
   const [staleServer, setStaleServer] = useState(false);
   const [elements, setElements] = useState<ElementNode[]>([]);
   const [selectReq, setSelectReq] = useState<{ path: string; nonce: number } | null>(null);
+  const [aiEvents, setAiEvents] = useState<RunEvent[]>([]);
+  const [runActive, setRunActive] = useState(false);
   const stateRef = useRef({ current, dirty: false });
   // dirty = 本地 ops 与服务器 patch 不一致（保存按钮/WS 自动刷新共用此语义）
   const dirty = JSON.stringify(ops) !== JSON.stringify(detail?.patch.ops ?? []);
@@ -92,6 +95,20 @@ export default function App() {
     const handleEvent = (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data);
+        if (data.type === "ai_run") {
+          // AI run 事件不依赖当前选图（造图/改造可以在无选中图时发起），
+          // 放在 early return 之前，保证 run_end 一定能复位 runActive。
+          setAiEvents((prev) => [...prev.slice(-199), { ...data, at: Date.now() }]);
+          if (data.phase === "run_end") {
+            setRunActive(false);
+            const cur = stateRef.current.current;
+            if (cur && data.project === cur.project && data.figure === cur.figure) {
+              loadFigure(cur.project, cur.figure, stateRef.current.dirty);
+            }
+            refreshProjects();
+          }
+          return;
+        }
         const cur = stateRef.current.current;
         if (!cur) return;
         if (data.type === "figure_updated" && data.project === cur.project && data.figure === cur.figure) {
@@ -265,7 +282,7 @@ export default function App() {
       // 单选保持对象形状（兼容服务端/MCP 旧契约），多选传数组
       const payload = jsons.length === 1 ? jsons[0] : jsons;
       api
-        .pushSelection(current.project, current.figure, payload)
+        .enrichSelection(current.project, current.figure, payload)
         .then((enriched) => setSelections(Array.isArray(enriched) ? enriched : [enriched]))
         .catch(() => setSelections(jsons));
     },
@@ -398,7 +415,7 @@ export default function App() {
 
         {staleServer && (
           <div className="dirty-banner" style={{ margin: "8px 12px 0" }}>
-            服务器上的图已更新（ZCode 改了代码）。本地有未保存的微调，未自动刷新；保存或撤销后刷新。
+            服务器上的图已更新（AI 或手动渲染）。本地有未保存的微调，未自动刷新；保存或撤销后刷新。
             <button
               className="small"
               style={{ marginLeft: 8 }}
@@ -433,6 +450,22 @@ export default function App() {
           </div>
         )}
       </div>
+
+      <AIPanel
+        projects={projects}
+        current={current}
+        selections={selections}
+        patchOpCount={detail?.patch.ops.length ?? 0}
+        runEvents={aiEvents}
+        runActive={runActive}
+        onRunStart={() => setRunActive(true)}
+        onFigureReady={(p, f) => selectFigure(p, f)}
+        onFigureChanged={() => {
+          refreshProjects();
+          if (current) loadFigure(current.project, current.figure, stateRef.current.dirty);
+        }}
+        showToast={showToast}
+      />
 
       <EditorPanel
         selections={selections}

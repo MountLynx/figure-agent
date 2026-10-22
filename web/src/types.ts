@@ -92,3 +92,31 @@ export interface VerifyResponse {
   remainingOps: number;
   cleared: boolean;
 }
+
+export interface AiStatus {
+  configured: boolean;
+  provider: string;
+  model: string;
+  mock: boolean;
+  detail?: string;
+}
+
+export interface AiRunResult {
+  kind: "create" | "adapt" | "edit" | "writeback";
+  ok: boolean;
+  rounds: number;
+  stderr: string;
+  error_line?: number | null;
+  notes?: string;
+  cleared?: boolean;
+  remaining?: number;
+}
+
+export interface RunEvent {
+  runId: string;
+  phase: "run_start" | "run_end" | "node_start" | "node_end" | "node_failed" | "llm_start" | "llm_end";
+  node?: string;
+  detail?: string;
+  ok?: boolean;
+  at: number;
+}

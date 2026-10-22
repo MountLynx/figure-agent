@@ -24,7 +24,7 @@ html, body, #root {
 
 .app {
   display: grid;
-  grid-template-columns: 220px 1fr 320px;
+  grid-template-columns: 220px 1fr 300px 320px;
   height: 100%;
 }
 
@@ -309,3 +309,18 @@ pre.code {
   z-index: 50;
 }
 .toast.error { background: var(--danger); }
+
+/* AI 面板 */
+.ai-panel { width: 300px; border-left: 1px solid #ddd; padding: 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.ai-panel h4 { margin: 0 0 6px; font-size: 13px; }
+.ai-panel section { display: flex; flex-direction: column; gap: 6px; }
+.ai-panel input, .ai-panel select, .ai-panel textarea { width: 100%; box-sizing: border-box; font-size: 12px; }
+.ai-panel textarea { min-height: 56px; resize: vertical; }
+.ai-status { font-size: 12px; color: #666; padding: 6px 8px; background: #f6f8fa; border-radius: 4px; }
+.ai-panel .adapt-form { display: flex; flex-direction: column; gap: 6px; padding-left: 8px; border-left: 2px solid #eee; }
+.ai-panel button.link { background: none; border: none; color: #2a6f97; cursor: pointer; padding: 0; text-align: left; font-size: 12px; }
+.run-events { list-style: none; margin: 0; padding: 0; font-size: 11px; font-family: ui-monospace, monospace; max-height: 220px; overflow-y: auto; }
+.run-ev { padding: 1px 0; color: #555; }
+.run-ev-run_start, .run-ev-run_end { color: #222; font-weight: 600; }
+.run-ev-node_failed { color: #b00; }
+.run-ev-llm_start, .run-ev-llm_end { color: #886; }

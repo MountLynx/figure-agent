@@ -1,6 +1,8 @@
 // REST API 客户端
 
 import type {
+  AiRunResult,
+  AiStatus,
   FigureDetail,
   PatchDoc,
   ProjectInfo,
@@ -69,8 +71,43 @@ export const api = {
       body: JSON.stringify({ note }),
     }).then((r) => json<{ id: string }>(r)),
 
-  pushSelection: (project: string, figure: string, selection: object | object[]) =>
-    fetch("/api/session/selection", {
+  aiStatus: () => fetch("/api/ai/status").then((r) => json<AiStatus>(r)),
+
+  createFigureAi: (project: string, name: string, requirements: string, data: File) => {
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("requirements", requirements);
+    fd.append("data", data);
+    return fetch(`/api/projects/${project}/figures/ai`, { method: "POST", body: fd }).then(
+      (r) => json<AiRunResult>(r)
+    );
+  },
+
+  adaptFigure: (project: string, name: string, requirements: string, data: File, script: File) => {
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("requirements", requirements);
+    fd.append("data", data);
+    fd.append("script", script);
+    return fetch(`/api/projects/${project}/figures/adapt`, { method: "POST", body: fd }).then(
+      (r) => json<AiRunResult>(r)
+    );
+  },
+
+  instruct: (project: string, figure: string, instruction: string, selection: object | object[]) =>
+    fetch(`/api/figure/${project}/${figure}/instruct`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction, selection }),
+    }).then((r) => json<AiRunResult>(r)),
+
+  writebackPatch: (project: string, figure: string) =>
+    fetch(`/api/figure/${project}/${figure}/writeback`, { method: "POST" }).then((r) =>
+      json<AiRunResult>(r)
+    ),
+
+  enrichSelection: (project: string, figure: string, selection: object | object[]) =>
+    fetch(`/api/figure/${project}/${figure}/enrich-selection`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project, figure, selection }),
