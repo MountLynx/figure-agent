@@ -7,6 +7,7 @@ list_runs 展平 detail，返回与旧 runs.jsonl 行相同的形状（前端契
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Optional
 
 from .items import now_utc
@@ -16,12 +17,15 @@ from .repo import Repo
 def add_run(repo: Repo, item_id: str, kind: str, ok: bool, rounds: int = 0,
             at: Optional[str] = None, detail: Optional[dict] = None) -> None:
     with repo.conn() as c:
-        c.execute(
-            "INSERT INTO fa_runs (item_id, kind, ok, at, rounds, detail)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (item_id, kind, 1 if ok else 0, at or now_utc(), rounds,
-             json.dumps(detail or {}, ensure_ascii=False)),
-        )
+        try:
+            c.execute(
+                "INSERT INTO fa_runs (item_id, kind, ok, at, rounds, detail)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (item_id, kind, 1 if ok else 0, at or now_utc(), rounds,
+                 json.dumps(detail or {}, ensure_ascii=False)),
+            )
+        except sqlite3.IntegrityError as exc:  # FK：幽灵条目
+            raise ValueError(f"条目不存在：{item_id}") from exc
 
 
 def list_runs(repo: Repo, item_id: str) -> list[dict]:
@@ -34,17 +38,21 @@ def list_runs(repo: Repo, item_id: str) -> list[dict]:
     out = []
     for r in rows:
         detail = json.loads(r["detail"] or "{}")
-        out.append({"at": r["at"], "kind": r["kind"], "ok": bool(r["ok"]),
-                    "rounds": r["rounds"], **detail})
+        # 基础列在后：detail 里的同名键（如历史脏数据带 "kind"）不得覆盖权威列
+        out.append({**detail, "at": r["at"], "kind": r["kind"], "ok": bool(r["ok"]),
+                    "rounds": r["rounds"]})
     return out
 
 
 def add_snapshot(repo: Repo, item_id: str, created_at: str, note: str, dir_: str) -> None:
     with repo.conn() as c:
-        c.execute(
-            "INSERT INTO fa_snapshots (item_id, created_at, note, dir) VALUES (?, ?, ?, ?)",
-            (item_id, created_at, note, dir_),
-        )
+        try:
+            c.execute(
+                "INSERT INTO fa_snapshots (item_id, created_at, note, dir) VALUES (?, ?, ?, ?)",
+                (item_id, created_at, note, dir_),
+            )
+        except sqlite3.IntegrityError as exc:  # FK：幽灵条目
+            raise ValueError(f"条目不存在：{item_id}") from exc
 
 
 def list_snapshots(repo: Repo, item_id: str) -> list[dict]:

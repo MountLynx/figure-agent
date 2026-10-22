@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Optional
 
 from .repo import Repo
@@ -35,10 +36,13 @@ def list_types(repo: Repo) -> list[dict]:
 
 def create_type(repo: Repo, name: str, icon: str = "file") -> dict:
     with repo.conn() as c:
-        cur = c.execute(
-            "INSERT INTO item_types (name, icon, namespace) VALUES (?, ?, 'default')",
-            (name, icon),
-        )
+        try:
+            cur = c.execute(
+                "INSERT INTO item_types (name, icon, namespace) VALUES (?, ?, 'default')",
+                (name, icon),
+            )
+        except sqlite3.IntegrityError as exc:  # name UNIQUE
+            raise ValueError(f"类型已存在：{name}") from exc
         return {"id": cur.lastrowid, "name": name, "icon": icon, "fields": []}
 
 
@@ -46,6 +50,10 @@ def delete_type(repo: Repo, type_id: int) -> None:
     if type_id in _PROTECTED_TYPE_IDS:
         raise ValueError(f"预设类型不可删除：{type_id}")
     with repo.conn() as c:
+        # items.type_id 的 FK 无 ON DELETE 动作：使用中的类型直接删会
+        # IntegrityError，先查使用情况给出可读错误。
+        if c.execute("SELECT 1 FROM items WHERE type_id = ?", (type_id,)).fetchone() is not None:
+            raise ValueError("类型使用中，先迁移或删除其条目")
         cur = c.execute("DELETE FROM item_types WHERE id = ?", (type_id,))
         if cur.rowcount == 0:
             raise ValueError(f"类型不存在：{type_id}")
@@ -56,17 +64,22 @@ def add_field(repo: Repo, type_id: int, name: str, field_type: str = "text",
     if field_type not in FIELD_TYPES:
         raise ValueError(f"非法字段类型：{field_type}")
     with repo.conn() as c:
+        if c.execute("SELECT 1 FROM item_types WHERE id = ?", (type_id,)).fetchone() is None:
+            raise ValueError(f"类型不存在：{type_id}")
         if position is None:
             row = c.execute(
                 "SELECT COALESCE(MAX(position) + 1, 0) FROM fields WHERE type_id = ?",
                 (type_id,),
             ).fetchone()
             position = row[0]
-        cur = c.execute(
-            "INSERT INTO fields (type_id, name, field_type, position, label, options)"
-            " VALUES (?, ?, ?, ?, ?, '[]')",
-            (type_id, name, field_type, position, label),
-        )
+        try:
+            cur = c.execute(
+                "INSERT INTO fields (type_id, name, field_type, position, label, options)"
+                " VALUES (?, ?, ?, ?, ?, '[]')",
+                (type_id, name, field_type, position, label),
+            )
+        except sqlite3.IntegrityError as exc:  # UNIQUE(type_id, name)
+            raise ValueError(f"字段已存在：{name}") from exc
         return {"id": cur.lastrowid, "name": name, "fieldType": field_type,
                 "position": position, "label": label, "options": []}
 
@@ -82,13 +95,15 @@ def update_field(repo: Repo, field_id: int, name: Optional[str] = None,
         if val is not None:
             sets.append(f"{col} = ?")
             params.append(val)
-    if not sets:
-        return
-    params.append(field_id)
     with repo.conn() as c:
-        cur = c.execute(f"UPDATE fields SET {', '.join(sets)} WHERE id = ?", params)
-        if cur.rowcount == 0:
+        # 存在性检查不看有没有字段要改：幽灵 id 无论何种调用都报错，
+        # 不再静默 no-op。
+        if c.execute("SELECT 1 FROM fields WHERE id = ?", (field_id,)).fetchone() is None:
             raise ValueError(f"字段不存在：{field_id}")
+        if not sets:
+            return
+        params.append(field_id)
+        c.execute(f"UPDATE fields SET {', '.join(sets)} WHERE id = ?", params)
 
 
 def remove_field(repo: Repo, field_id: int) -> None:

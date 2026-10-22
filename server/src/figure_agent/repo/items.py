@@ -31,7 +31,8 @@ def now_utc() -> str:
 
 
 def require_id(item_id: str) -> str:
-    if not ID_RE.match(item_id or ""):
+    # fullmatch 而非 match+$：Python 的 $ 容忍尾 \n，fullmatch 不容忍
+    if not ID_RE.fullmatch(item_id or ""):
         raise ValueError(f"非法条目 id：{item_id!r}")
     return item_id
 
@@ -50,7 +51,11 @@ def get_item(repo: Repo, item_id: str) -> Optional[dict]:
             " JOIN item_types t ON t.id = i.type_id WHERE i.id = ?",
             (item_id,),
         ).fetchone()
-    return _dict(row) if row else None
+    if row is None:
+        return None
+    item = _dict(row)
+    item["typeName"] = item.pop("type_name")
+    return item
 
 
 def list_items(repo: Repo, type_name: Optional[str] = None, q: Optional[str] = None,
@@ -75,7 +80,7 @@ def list_items(repo: Repo, type_name: Optional[str] = None, q: Optional[str] = N
     with repo.conn() as c:
         for row in c.execute(sql, params).fetchall():
             item = _dict(row)
-            item["typeName"] = row["type_name"]
+            item["typeName"] = item.pop("type_name")
             item["groupIds"] = [r[0] for r in c.execute(
                 "SELECT group_id FROM item_groups WHERE item_id = ? ORDER BY group_id",
                 (row["id"],))]
@@ -148,8 +153,11 @@ def delete_item(repo: Repo, item_id: str) -> None:
 
 def bind_group(repo: Repo, item_id: str, group_id: int) -> None:
     with repo.conn() as c:
-        c.execute("INSERT OR IGNORE INTO item_groups (item_id, group_id) VALUES (?, ?)",
-                  (item_id, group_id))
+        try:
+            c.execute("INSERT OR IGNORE INTO item_groups (item_id, group_id) VALUES (?, ?)",
+                      (item_id, group_id))
+        except sqlite3.IntegrityError as exc:  # FK：幽灵条目/分组（OR IGNORE 不作用于 FK）
+            raise ValueError(f"条目或分组不存在：{item_id} / {group_id}") from exc
 
 
 def unbind_group(repo: Repo, item_id: str, group_id: int) -> None:
@@ -160,8 +168,11 @@ def unbind_group(repo: Repo, item_id: str, group_id: int) -> None:
 
 def bind_tag(repo: Repo, item_id: str, tag_id: int) -> None:
     with repo.conn() as c:
-        c.execute("INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)",
-                  (item_id, tag_id))
+        try:
+            c.execute("INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)",
+                      (item_id, tag_id))
+        except sqlite3.IntegrityError as exc:  # FK：幽灵条目/标签
+            raise ValueError(f"条目或标签不存在：{item_id} / {tag_id}") from exc
 
 
 def unbind_tag(repo: Repo, item_id: str, tag_id: int) -> None:
