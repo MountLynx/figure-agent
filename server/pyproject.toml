@@ -11,6 +11,9 @@ dependencies = [
     "httpx>=0.27",
     "pandas>=2.0",
     "openpyxl>=3.1",
+    # LLM provider SDK（SpecModule 按 provider 选装；本仓库 config.json 用
+    # openai 兼容后端，属硬依赖。换 anthropic 后端时补装 anthropic）
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]

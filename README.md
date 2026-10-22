@@ -52,6 +52,8 @@ AI 能力由 FastAPI 服务内嵌的 SpecModule 工作流提供（harness=LLM �
 server\.venv\Scripts\pip install -e "C:\Users\xingy\Desktop\开发\SpecModule"
 ```
 
+注意：provider SDK 按 `sdktype` 选装（`openai` 兼容后端装 `openai`，Anthropic 装 `anthropic`）——本仓库 pyproject 已内置 `openai`；新建环境装完 SpecModule 后如报「客户端未就绪（openai 包未安装）」即是漏了这步。
+
 ## 操作说明（前端）
 
 - 鼠标悬停元素 → 虚线框 + 名称提示（预览"点下去会选中谁"，与单击同一套语义归并）；悬停已选中元素不重复提示
