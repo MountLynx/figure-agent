@@ -23,8 +23,14 @@ def ai_status() -> dict:
         from llm import LLMConfig
 
         cfg = LLMConfig.from_env(project_root=REPO_ROOT)
-    except Exception:
-        return {"configured": False, "provider": "", "model": "", "mock": False}
+    except Exception as exc:
+        return {
+            "configured": False,
+            "provider": "",
+            "model": "",
+            "mock": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
     return {
         "configured": True,
         "provider": cfg.provider,

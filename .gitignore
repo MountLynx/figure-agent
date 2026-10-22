@@ -16,3 +16,6 @@ web/dist/
 
 # 系统
 .DS_Store
+
+# 密钥（SpecModule LLM 配置链从仓库根读取；勿提交）
+.env
