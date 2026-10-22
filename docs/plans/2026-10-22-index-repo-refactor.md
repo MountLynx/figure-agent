@@ -372,15 +372,15 @@ class Repo:
             yield c
 
     def open_or_init(self) -> None:
-        if self.db_path.exists():
-            with self.conn() as c:
-                ensure_fa_schema(c)
-        else:
+        if not self.db_path.exists():
             self.index_dir.mkdir(parents=True, exist_ok=True)
-            with self.conn() as c:
-                ensure_sqlx_schema(c)
-                ensure_fa_schema(c)
-                _seed(c)
+        # ensure_sqlx_schema 无条件调用（自防御）：已有账本 → no-op；
+        # 有 items 表但无账本 → RuntimeError（拒绝非本工具创建的库）；
+        # 空库/空文件 → 正常建账本
+        with self.conn() as c:
+            ensure_sqlx_schema(c)
+            ensure_fa_schema(c)
+            _seed(c)
         ws_dir = self.index_dir / "workspaces"
         ws_dir.mkdir(exist_ok=True)
         ws_file = ws_dir / "默认工作区.json"
