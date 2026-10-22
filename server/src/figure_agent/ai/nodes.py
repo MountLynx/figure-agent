@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from pathlib import Path
 
-from ..store import Store
+from ..store import Store, now_iso
 
 MAX_ROUNDS = 3  # 渲染修复 / 回写收敛的共同轮数上限
 
@@ -21,17 +20,24 @@ MAX_ROUNDS = 3  # 渲染修复 / 回写收敛的共同轮数上限
 # ---------------------------------------------------------------- 造图链
 
 def make_parse_upload(fdir: Path, upload_name: str):
-    """uploads/<upload_name> → 表格文本。二进制表格走 pandas，其余按文本读。"""
-    path = fdir / "uploads" / upload_name
+    """uploads/<upload_name> → 表格文本。二进制表格走 pandas，其余按文本读。
+
+    upload_name 来自 REST 层的 Path(...).name，但工厂内再做一次逃逸防御。
+    只支持 .xlsx（openpyxl 后端）；遗留 .xls 需要 xlrd，不装（明确拒绝）。
+    """
+    path = (fdir / "uploads" / upload_name).resolve()
+    path.relative_to((fdir / "uploads").resolve())  # 逃逸 uploads/ 直接抛错
 
     async def parse_upload(view) -> str:
         def _read() -> str:
             suffix = path.suffix.lower()
-            if suffix in (".xlsx", ".xls"):
+            if suffix == ".xlsx":
                 import pandas as pd
 
                 df = pd.read_excel(path)
                 return df.to_csv(index=False)
+            if suffix in (".xls",):
+                raise ValueError("不支持遗留 .xls 格式，请另存为 .xlsx")
             return path.read_text(encoding="utf-8", errors="replace")
 
         return await asyncio.to_thread(_read)
@@ -44,6 +50,8 @@ def make_write_data(fdir: Path):
 
     def write_data(view) -> dict:
         out = view.field("data")  # Standardize 输出 {csv, profile, notes}
+        if not isinstance(out, dict):
+            raise TypeError(f"Standardize 上游输出非 dict：{type(out).__name__}")
         profile = dict(out.get("profile") or {})
         merged = (str(profile.get("notes", "")) + " " + str(out.get("notes", ""))).strip()
         profile["notes"] = merged
@@ -107,7 +115,7 @@ def make_read_patch(store: Store, project: str, figure: str):
     return read_patch
 
 
-def make_merge_wb(store: Store, fdir: Path, project: str, figure: str):
+def make_merge_wb(fdir: Path):
     """合并种子 ops 与最新校验结果；附当前代码；计数轮数（跨 tick 持久）。"""
 
     def merge_wb(view) -> dict:
@@ -131,7 +139,7 @@ def make_merge_wb(store: Store, fdir: Path, project: str, figure: str):
     return merge_wb
 
 
-def make_render_verify(store: Store, fdir: Path, project: str, figure: str):
+def make_render_verify(store: Store, project: str, figure: str):
     """回写代码 → 渲染 → verify_patch 收敛判定。"""
 
     async def render_verify(view) -> dict:
@@ -158,10 +166,16 @@ def make_render_verify(store: Store, fdir: Path, project: str, figure: str):
 # ---------------------------------------------------------------- 终点
 
 def make_finalize(fdir: Path, kind: str):
-    """终点节点：规范化返回值 + 追加 runs.jsonl。writeback 的 ok = cleared。"""
+    """终点节点：规范化返回值 + 追加 runs.jsonl。writeback 的 ok = cleared。
+
+    读 bind 字段 "result"（TaskDefinition inputs={"result": 上游节点}）——
+    真实引擎的 NodeView 没有 .output 属性（那是 GuardView 的），body 里读
+    view.output 会 AttributeError 静默失败（评审仿真发现）。
+    """
 
     def finalize(view) -> dict:
-        o = view.output if isinstance(view.output, dict) else {}
+        o = view.field("result")
+        o = o if isinstance(o, dict) else {}
         result = {
             "kind": kind,
             "ok": bool(o.get("cleared")) if kind == "writeback" else bool(o.get("ok")),
@@ -173,7 +187,7 @@ def make_finalize(fdir: Path, kind: str):
         if kind == "writeback":
             result["cleared"] = bool(o.get("cleared"))
             result["remaining"] = o.get("remaining", -1)
-        entry = {"at": datetime.now().isoformat(timespec="seconds"), **result}
+        entry = {"at": now_iso(), **result}
         with (fdir / "runs.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         return result
@@ -203,8 +217,3 @@ def wb_continue(view) -> bool:
 
 def wb_done(view) -> bool:
     return not wb_continue(view)  # 严格互补
-
-
-def wb_verify_settled(view) -> bool:
-    o = _out(view)
-    return bool(o.get("cleared")) or o.get("rounds", 0) >= MAX_ROUNDS

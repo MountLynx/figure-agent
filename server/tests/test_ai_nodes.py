@@ -133,7 +133,7 @@ def test_writeback_nodes(tmp_path):
     seed = rp(FakeView())
     assert len(seed["ops"]) == 1
 
-    merge = nodes.make_merge_wb(store, fdir, "p", "f")
+    merge = nodes.make_merge_wb(fdir)
     m1 = merge(FakeView(fields={"seed": seed}))          # 首轮：无 verify
     assert m1["cleared"] is False and m1["rounds"] == 0
     assert nodes.wb_continue(FakeView(output=m1)) is True
@@ -150,7 +150,6 @@ def test_writeback_nodes(tmp_path):
     m3 = merge(FakeView(fields={"seed": seed, "verify": verify2}))
     assert nodes.wb_continue(FakeView(output=m3)) is False
     assert nodes.wb_done(FakeView(output=m3)) is True
-    assert nodes.wb_verify_settled(FakeView(output=verify2)) is True
 
     # 空 patch：直接收敛路径
     m4 = merge(FakeView(fields={"seed": {"ops": []}}))
@@ -161,11 +160,22 @@ def test_writeback_nodes(tmp_path):
 def test_finalize_writes_runs_jsonl(tmp_path):
     store, fdir = _make_store_fig(tmp_path)
     fn = nodes.make_finalize(fdir, "create")
-    result = fn(FakeView(output={"ok": True, "rounds": 2, "stderr": "", "notes": "done"}))
+    result = fn(FakeView(fields={"result": {"ok": True, "rounds": 2, "stderr": "", "notes": "done"}}))
     assert result["kind"] == "create" and result["ok"] is True
     lines = (fdir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1 and json.loads(lines[0])["kind"] == "create"
 
     fn_wb = nodes.make_finalize(fdir, "writeback")
-    r2 = fn_wb(FakeView(output={"cleared": False, "rounds": 3, "remaining": 1, "stderr": "", "ok": True}))
+    r2 = fn_wb(FakeView(fields={"result": {"cleared": False, "rounds": 3, "remaining": 1, "stderr": "", "ok": True}}))
     assert r2["ok"] is False  # writeback 的 ok = cleared
+
+
+def test_render_validate_tolerates_missing_sentinel(tmp_path):
+    """真实引擎未点火 producer 返回 tickflow Missing（非 KeyError）——isinstance 防御须兜住。"""
+    from tickflow.views import Missing
+
+    store, fdir = _make_store_fig(tmp_path)
+    fn = nodes.make_render_validate(store, fdir, "p", "f")
+    out = asyncio.run(fn(FakeView(fields={"gen": {"code": ""}, "fix": Missing})))
+    # fix 为 Missing（非 dict）→ 走 gen；gen.code 为空串 → 视为无代码
+    assert out["ok"] is False and out["source"] == "gen" and "未产出代码" in out["stderr"]
