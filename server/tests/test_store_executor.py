@@ -32,110 +32,149 @@ CODE_BAD_FONTS = (
 @pytest.fixture()
 def store(tmp_path):
     s = Store(tmp_path / "ws")
-    s.create_figure("p", "f1", "bar-groups")
-    return s
+    fid = s.create_figure("f1", template="bar-groups")["id"]
+    return s, fid
 
 
 def test_write_code_and_render(store):
-    res = store.write_code("p", "f1", CODE_OK)
+    s, fid = store
+    res = s.write_code(fid, CODE_OK)
     assert res.ok, res.stderr
     assert res.stats["faGroups"] == ["fa:bar-0", "fa:bar-1"]
-    base = store.read_svg("p", "f1", "base")
+    base = s.read_svg(fid, "base")
     assert "fa:bar-0" in base
+    # 渲染时间进 SQL（properties），不再有 meta.json
+    assert s.read_item(fid)["properties"]["最后渲染"]
+    assert not (s.figure_dir(fid) / "meta.json").exists()
 
 
 def test_syntax_error_reports_line(store):
-    res = store.write_code("p", "f1", CODE_SYNTAX_ERROR)
+    s, fid = store
+    res = s.write_code(fid, CODE_SYNTAX_ERROR)
     assert not res.ok
     assert res.error_line == 2
     assert "Traceback" in res.stderr
-    # 上一版 base.svg 保留
-    assert store.read_svg("p", "f1", "base") is not None
+    assert s.read_svg(fid, "base") is not None
 
 
 def test_no_fig_error(store):
-    res = store.write_code("p", "f1", CODE_NO_FIG)
+    s, fid = store
+    res = s.write_code(fid, CODE_NO_FIG)
     assert not res.ok
     assert "fig" in res.stderr
 
 
 def test_fonttype_override_warning(store):
-    res = store.write_code("p", "f1", CODE_BAD_FONTS)
+    s, fid = store
+    res = s.write_code(fid, CODE_BAD_FONTS)
     assert res.ok
     assert any("svg.fonttype" in w for w in (res.warnings or []))
-    # 产物文字仍是 <text>
-    assert "<text" in store.read_svg("p", "f1", "base")
+    assert "<text" in s.read_svg(fid, "base")
 
 
 def test_render_deterministic_hash(store):
-    res1 = store.render("p", "f1")
-    h1 = store.read_patch("p", "f1")["baseHash"]
-    res2 = store.render("p", "f1")
-    h2 = store.read_patch("p", "f1")["baseHash"]
-    assert res1.ok and res2.ok
+    s, fid = store
+    s.render(fid)
+    h1 = s.read_patch(fid)["baseHash"]
+    s.render(fid)
+    h2 = s.read_patch(fid)["baseHash"]
     assert h1 == h2
 
 
 def test_patch_survives_rerender(store):
+    s, fid = store
     patch = {"baseHash": "", "ops": [
         {"id": "op-1", "kind": "set_style", "target": {"id": "fa:treatment-bar-1"},
          "attr": "fill", "value": "#dd3322", "intent": "改红", "origin": "manual", "status": "active"},
     ]}
-    store.save_patch("p", "f1", patch)
-    store.render("p", "f1")  # 代码重跑
-    final = store.read_svg("p", "f1", "final")
-    assert "#dd3322" in final  # S2：微调不丢
-    ops = store.read_patch("p", "f1")["ops"]
+    s.save_patch(fid, patch)
+    s.render(fid)
+    final = s.read_svg(fid, "final")
+    assert "#dd3322" in final
+    ops = s.read_patch(fid)["ops"]
     assert ops[0]["status"] == "active"
 
 
 def test_writeback_flow(store):
     """S3 全流程：微调 → 代码表达 → verify → patch 清空。"""
+    s, fid = store
     patch = {"baseHash": "", "ops": [
         {"id": "op-1", "kind": "set_style", "target": {"id": "fa:treatment-bar-2"},
          "attr": "fill", "value": "#dd3322", "intent": "改红", "origin": "manual", "status": "active"},
     ]}
-    store.save_patch("p", "f1", patch)
-    # 未回写时 verify：active
-    v1 = store.verify_patch("p", "f1")
+    s.save_patch(fid, patch)
+    v1 = s.verify_patch(fid)
     assert v1["results"][0]["status"] == "active"
     assert v1["cleared"] is False
-    # 回写
-    code = store.read_code("p", "f1").replace('"#d08770"', '"#dd3322"')
-    store.write_code("p", "f1", code)
-    v2 = store.verify_patch("p", "f1")
+    code = s.read_code(fid).replace('"#d08770"', '"#dd3322"')
+    s.write_code(fid, code)
+    v2 = s.verify_patch(fid)
     assert v2["cleared"] is True
-    assert store.read_patch("p", "f1")["ops"] == []
+    assert s.read_patch(fid)["ops"] == []
 
 
 def test_snapshot(store):
-    store.snapshot("p", "f1", "初始版")
-    snaps = store.snapshots("p", "f1")
+    s, fid = store
+    s.snapshot(fid, "初始版")
+    snaps = s.snapshots(fid)
     assert len(snaps) == 1
     assert snaps[0]["note"] == "初始版"
 
 
-def test_init_figure(tmp_path):
-    store = Store(tmp_path / "ws")
-    store.init_figure("p", "f", origin="ai")
-    fdir = store.figure_dir("p", "f")
-    assert (fdir / "meta.json").exists()
-    meta = store.read_meta("p", "f")
-    assert meta["origin"] == "ai" and meta["lastRenderAt"] is None
-    assert store.read_patch("p", "f") == {"baseHash": "", "ops": []}
+def test_create_without_template(tmp_path):
+    s = Store(tmp_path / "ws")
+    fid = s.create_figure("f", origin="ai")["id"]
+    fdir = s.figure_dir(fid)
+    assert fdir.is_dir() and (fdir / "history").is_dir()
+    assert not (fdir / "plot.py").exists()
+    assert s.read_item(fid)["properties"]["来源"] == "ai"
+    assert s.read_patch(fid) == {"baseHash": "", "ops": []}
+    assert not (fdir / "meta.json").exists()
+    # 同名允许（Index 语义）
+    fid2 = s.create_figure("f", origin="ai")["id"]
+    assert fid2 != fid
+
+
+def test_create_rejects_bad_names(store):
+    s, _ = store
     with pytest.raises(ValueError):
-        store.init_figure("p", "f", origin="ai")
-
-
-def test_create_figure_rejects_bad_names(store):
+        s.create_figure("../evil", template="bar-groups")
     with pytest.raises(ValueError):
-        store.create_figure("p", "../evil", "bar-groups")
+        s.create_figure("a/b", template="bar-groups")
+
+
+def test_rename_figure_only_touches_db(store):
+    s, fid = store
+    s.rename_figure(fid, "新名字")
+    assert s.read_item(fid)["name"] == "新名字"
+    assert s.figure_dir(fid).name == fid  # 文件夹（id）不变
+
+
+def test_delete_figure_removes_folder_and_rows(store):
+    s, fid = store
+    fdir = s.figure_dir(fid)
+    s.delete_figure(fid)
+    assert not fdir.exists()
     with pytest.raises(ValueError):
-        store.create_figure("../evil", "f", "bar-groups")
+        s.read_item(fid)
+    with pytest.raises(ValueError):
+        s.delete_figure(fid)
 
 
-def test_create_figure_rejects_windows_invalid_names(store):
-    # 结尾的点/空格会被 Windows 静默剥离；保留设备名无法建目录
-    for bad in ("demo.", "demo ", "con", "aux", "NUL", "com1"):
-        with pytest.raises(ValueError):
-            store.create_figure("p", bad, "bar-groups")
+def test_create_bad_template_rolls_back(tmp_path):
+    s = Store(tmp_path / "ws")
+    with pytest.raises(ValueError):
+        s.create_figure("x", template="nope")
+    assert s.list_figures() == []
+    assert not (tmp_path / "ws").exists() or not any(
+        p.name.isalnum() and len(p.name) == 12 for p in (tmp_path / "ws").iterdir()
+    )
+
+
+def test_read_files_lists_entry_folder(store):
+    s, fid = store
+    files = s.read_files(fid)
+    paths = {f["path"] for f in files}
+    assert "plot.py" in paths and "history" in paths
+    with pytest.raises(ValueError):
+        s.read_files("../evil")

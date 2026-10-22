@@ -1,8 +1,8 @@
-"""工作区存储：项目/图目录管理、渲染管线、patch 持久化、快照。
+"""工作区存储（Index 仓库门面）：条目/分组/标签/审计经 repo 包走 index.db；
+渲染管线、patch 持久化、快照载荷走条目文件夹（扁平 <12hex>，永不改名）。
 
-目录布局（§4.1）：workspace/<project>/<figure>/{plot.py, base.svg,
-patch.json, meta.json, history/}。base.svg/final.svg 由服务生成，
-不进 git；patch.json 进 git。
+目录契约（spec §2）：workspace/.index/index.db + workspace/<12hex>/{plot.py,
+base.svg, patch.json, history/}。管理语义全部在 SQL；文件系统只承载内容。
 """
 
 from __future__ import annotations
@@ -10,25 +10,21 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import executor
+from .repo import items as repo_items
+from .repo import runs as repo_runs
+from .repo.items import require_id
+from .repo.repo import FIGURE_TYPE_NAME, Repo
 from .svgkit import base_hash, normalize, parse_svg, serialize
 from .svgkit import identity, patchops
 from .svgkit import geom
 
 NAME_RE = re.compile(r"^[\w][\w .-]*$")
-
-# Windows 保留设备名（不分大小写），用作目录名会导致建目录失败
-_WIN_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
 
@@ -38,14 +34,10 @@ def now_iso() -> str:
 
 
 def _require_name(name: str, what: str) -> str:
+    """名字进 SQL（不再是目录名），仅做基本卫生校验。"""
     n = name or ""
     if not NAME_RE.match(n):
         raise ValueError(f"非法的{what}名：{name!r}")
-    # Windows 会静默剥离目录名结尾的点/空格，导致目录名与请求名不一致
-    if n != n.rstrip(" ."):
-        raise ValueError(f"非法的{what}名（结尾的点/空格）：{name!r}")
-    if n.upper() in _WIN_RESERVED:
-        raise ValueError(f"非法的{what}名（Windows 保留设备名）：{name!r}")
     return n
 
 
@@ -63,65 +55,48 @@ class Store:
         self.workspace = Path(workspace)
         self.render_timeout = render_timeout
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.repo = Repo(self.workspace)
+        self.repo.open_or_init()
 
-    # ------------------------------------------------------------ 路径
+    # ------------------------------------------------------------ 路径/条目
 
-    def project_dir(self, project: str) -> Path:
-        return self.workspace / _require_name(project, "项目")
+    def figure_dir(self, item_id: str) -> Path:
+        require_id(item_id)
+        return self.workspace / item_id
 
-    def figure_dir(self, project: str, figure: str) -> Path:
-        return self.project_dir(project) / _require_name(figure, "图")
+    def read_item(self, item_id: str) -> Dict:
+        item = repo_items.get_item(self.repo, item_id)
+        if item is None:
+            raise ValueError(f"图不存在：{item_id}")
+        return item
 
     # ------------------------------------------------------------ 枚举
 
-    def projects(self) -> List[Dict]:
+    def list_figures(self, q: Optional[str] = None, group_id: Optional[int] = None,
+                     tag_id: Optional[int] = None) -> List[Dict]:
         out = []
-        for pdir in sorted(self.workspace.iterdir()):
-            if not pdir.is_dir() or pdir.name.startswith((".", "_")):
-                continue
-            figs = self.figures(pdir.name)
-            if figs or (pdir / "plot.py").exists():
-                out.append({"name": pdir.name, "figures": figs})
-        return out
-
-    def figures(self, project: str) -> List[Dict]:
-        pdir = self.project_dir(project)
-        if not pdir.is_dir():
-            return []
-        out = []
-        for fdir in sorted(pdir.iterdir()):
-            if not fdir.is_dir() or fdir.name.startswith((".", "_")):
-                continue
-            meta = self.read_meta(project, fdir.name) or {}
-            patch = self.read_patch(project, fdir.name) or {"ops": []}
-            out.append(
-                {
-                    "name": fdir.name,
-                    "hasBase": (fdir / "base.svg").exists(),
-                    "lastRenderAt": meta.get("lastRenderAt"),
-                    "opCount": len(patch.get("ops", [])),
-                }
-            )
+        for item in repo_items.list_items(self.repo, FIGURE_TYPE_NAME, q=q,
+                                          group_id=group_id, tag_id=tag_id):
+            fdir = self.workspace / item["id"]
+            patch = self._read_patch_file(fdir) or {"ops": []}
+            out.append({
+                **item,
+                "hasBase": (fdir / "base.svg").exists(),
+                "lastRenderAt": item["properties"].get("最后渲染"),
+                "opCount": len(patch.get("ops", [])),
+            })
         return out
 
     # ------------------------------------------------------------ 元数据/文件
 
-    def read_meta(self, project: str, figure: str) -> Optional[Dict]:
-        path = self.figure_dir(project, figure) / "meta.json"
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
+    def read_code(self, item_id: str) -> str:
+        return (self.figure_dir(item_id) / "plot.py").read_text(encoding="utf-8")
 
-    def _write_meta(self, fdir: Path, meta: Dict) -> None:
-        (fdir / "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+    def read_patch(self, item_id: str) -> Optional[Dict]:
+        return self._read_patch_file(self.figure_dir(item_id))
 
-    def read_code(self, project: str, figure: str) -> str:
-        return (self.figure_dir(project, figure) / "plot.py").read_text(encoding="utf-8")
-
-    def read_patch(self, project: str, figure: str) -> Optional[Dict]:
-        path = self.figure_dir(project, figure) / "patch.json"
+    def _read_patch_file(self, fdir: Path) -> Optional[Dict]:
+        path = fdir / "patch.json"
         if not path.exists():
             return None
         try:
@@ -134,11 +109,27 @@ class Store:
             json.dumps(patch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
 
-    def read_svg(self, project: str, figure: str, which: str = "base") -> Optional[str]:
-        path = self.figure_dir(project, figure) / f"{which}.svg"
+    def read_svg(self, item_id: str, which: str = "base") -> Optional[str]:
+        path = self.figure_dir(item_id) / f"{which}.svg"
         if not path.exists():
             return None
         return path.read_text(encoding="utf-8")
+
+    def read_files(self, item_id: str, subdir: str = "") -> List[Dict]:
+        """条目文件夹递归清单（前端文件树）。路径穿越防御。"""
+        require_id(item_id)
+        base = self.figure_dir(item_id).resolve()
+        root = (base / subdir).resolve()
+        root.relative_to(base)
+        out: List[Dict] = []
+        if not root.is_dir():
+            return out
+        for p in sorted(root.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+            rel = p.relative_to(base).as_posix()
+            out.append({"path": rel, "isDir": p.is_dir()})
+            if p.is_dir():
+                out.extend(self.read_files(item_id, rel))
+        return out
 
     # ------------------------------------------------------------ 建图
 
@@ -161,61 +152,55 @@ class Store:
                 )
         return out
 
-    def init_figure(self, project: str, figure: str, origin: str) -> None:
-        """建图目录（无模板代码）：AI 造图/改造的入口。已存在则 ValueError。"""
-        _require_name(project, "项目")
-        _require_name(figure, "图")
-        fdir = self.figure_dir(project, figure)
-        if fdir.exists():
-            raise ValueError(f"图已存在：{project}/{figure}")
+    def create_figure(self, name: str, template: Optional[str] = None,
+                      origin: str = "template",
+                      group_id: Optional[int] = None) -> Dict:
+        """建图：INSERT items + 立即建内容文件夹（plot.py 是真相源）。
+        同名图允许（Index 语义，id 消歧）。失败整体回滚。"""
+        _require_name(name, "图")
+        props: Dict = {"来源": origin}
+        if template:
+            props["模板"] = template
+        item = repo_items.create_item(self.repo, name, FIGURE_TYPE_NAME, props)
+        fdir = self.workspace / item["id"]
         try:
             fdir.mkdir(parents=True)
-        except FileExistsError:  # TOCTOU：exists 检查与建目录之间的竞争
-            raise ValueError(f"图已存在：{project}/{figure}")
-        (fdir / "history").mkdir()
-        self._write_meta(
-            fdir,
-            {
-                "name": figure,
-                "project": project,
-                "origin": origin,
-                "createdAt": now_iso(),
-                "lastRenderAt": None,
-            },
-        )
-        self._write_patch(fdir, {"baseHash": "", "ops": []})
+            (fdir / "history").mkdir()
+            if template:
+                tdir = TEMPLATES_DIR / _require_name(template, "模板")
+                if not (tdir / "plot.py").exists():
+                    raise ValueError(f"模板不存在：{template}")
+                shutil.copy(tdir / "plot.py", fdir / "plot.py")
+            self._write_patch(fdir, {"baseHash": "", "ops": []})
+        except Exception:
+            shutil.rmtree(fdir, ignore_errors=True)
+            try:
+                repo_items.delete_item(self.repo, item["id"])
+            except ValueError:
+                pass
+            raise
+        if group_id is not None:
+            repo_items.bind_group(self.repo, item["id"], group_id)
+        outcome = self.render(item["id"]) if template else None
+        return {"id": item["id"], "name": name,
+                "ok": outcome.ok if outcome else False,
+                "stderr": outcome.stderr if outcome else ""}
 
-    def create_figure(self, project: str, figure: str, template: str) -> Dict:
-        _require_name(project, "项目")
-        _require_name(figure, "图")
-        tdir = TEMPLATES_DIR / _require_name(template, "模板")
-        if not (tdir / "plot.py").exists():
-            raise ValueError(f"模板不存在：{template}")
-        fdir = self.figure_dir(project, figure)
-        if fdir.exists():
-            raise ValueError(f"图已存在：{project}/{figure}")
-        fdir.mkdir(parents=True)
-        (fdir / "history").mkdir()
-        shutil.copy(tdir / "plot.py", fdir / "plot.py")
-        self._write_meta(
-            fdir,
-            {
-                "name": figure,
-                "project": project,
-                "template": template,
-                "origin": "template",
-                "createdAt": now_iso(),
-                "lastRenderAt": None,
-            },
-        )
-        self._write_patch(fdir, {"baseHash": "", "ops": []})
-        outcome = self.render(project, figure)
-        return {"ok": outcome.ok, "stderr": outcome.stderr}
+    def rename_figure(self, item_id: str, name: str) -> Dict:
+        """与 Index 对齐：只动 SQL，文件夹名（id）永不变。"""
+        _require_name(name, "图")
+        self.read_item(item_id)
+        return repo_items.update_item(self.repo, item_id, name=name)
+
+    def delete_figure(self, item_id: str) -> None:
+        """SQL 先行（CASCADE 清绑定与 fa 表），再 best-effort 删文件夹。"""
+        repo_items.delete_item(self.repo, item_id)
+        shutil.rmtree(self.figure_dir(item_id), ignore_errors=True)
 
     # ------------------------------------------------------------ 渲染管线
 
-    def render(self, project: str, figure: str) -> RenderOutcome:
-        fdir = self.figure_dir(project, figure)
+    def render(self, item_id: str) -> RenderOutcome:
+        fdir = self.figure_dir(item_id)
         plot_py = fdir / "plot.py"
         if not plot_py.exists():
             return RenderOutcome(ok=False, stderr="plot.py 不存在")
@@ -239,7 +224,7 @@ class Store:
         normalize(new_root)
         new_text = serialize(new_root)
 
-        old_text = self.read_svg(project, figure, "base")
+        old_text = self.read_svg(item_id, "base")
         old_root = None
         if old_text:
             try:
@@ -248,7 +233,7 @@ class Store:
             except Exception:
                 old_root = None
 
-        patch = self.read_patch(project, figure) or {"baseHash": "", "ops": []}
+        patch = self.read_patch(item_id) or {"baseHash": "", "ops": []}
 
         # set_visible(隐藏) 特例：目标已从新 base 消失 = 代码已 set_visible(False)，
         # 视为已表达。必须先于 identity.match 剪除——否则 match 会把 op
@@ -283,9 +268,7 @@ class Store:
         patch["baseHash"] = base_hash(new_text)
         self._write_patch(fdir, patch)
 
-        meta = self.read_meta(project, figure) or {}
-        meta["lastRenderAt"] = now_iso()
-        self._write_meta(fdir, meta)
+        repo_items.merge_properties(self.repo, item_id, {"最后渲染": now_iso()})
         tmp.unlink(missing_ok=True)
 
         stats = self.figure_stats(new_root)
@@ -316,17 +299,17 @@ class Store:
 
     # ------------------------------------------------------------ 代码写入
 
-    def write_code(self, project: str, figure: str, code: str) -> RenderOutcome:
-        fdir = self.figure_dir(project, figure)
+    def write_code(self, item_id: str, code: str) -> RenderOutcome:
+        fdir = self.figure_dir(item_id)
         (fdir / "plot.py").write_text(code, encoding="utf-8")
-        return self.render(project, figure)
+        return self.render(item_id)
 
     # ------------------------------------------------------------ patch
 
-    def save_patch(self, project: str, figure: str, patch: Dict) -> Dict:
+    def save_patch(self, item_id: str, patch: Dict) -> Dict:
         """写 patch.json；为 transform op 补 pre（从当前 base 估算）。"""
-        fdir = self.figure_dir(project, figure)
-        base_text = self.read_svg(project, figure, "base")
+        fdir = self.figure_dir(item_id)
+        base_text = self.read_svg(item_id, "base")
         if base_text:
             root = parse_svg(base_text)
             normalize(root)
@@ -359,9 +342,9 @@ class Store:
             (fdir / "final.svg").write_text(final_text, encoding="utf-8")
         return {"ok": True}
 
-    def verify_patch(self, project: str, figure: str) -> Dict:
-        base_text = self.read_svg(project, figure, "base")
-        patch = self.read_patch(project, figure) or {"baseHash": "", "ops": []}
+    def verify_patch(self, item_id: str) -> Dict:
+        base_text = self.read_svg(item_id, "base")
+        patch = self.read_patch(item_id) or {"baseHash": "", "ops": []}
         if not base_text:
             return {"results": [], "remainingOps": 0, "cleared": True, "error": "base.svg 不存在"}
         root = parse_svg(base_text)
@@ -375,9 +358,9 @@ class Store:
             elif op.get("status") == "lost" and st.get("status") == "active":
                 # verify 重新找到了目标（目标回来了）
                 op["status"] = "active"
-        self._write_patch(self.figure_dir(project, figure), new_patch)
+        self._write_patch(self.figure_dir(item_id), new_patch)
         final_text, _ = patchops.apply_patch(root, new_patch)
-        (self.figure_dir(project, figure) / "final.svg").write_text(final_text, encoding="utf-8")
+        (self.figure_dir(item_id) / "final.svg").write_text(final_text, encoding="utf-8")
         remaining = len(new_patch.get("ops", []))
         return {
             "results": [
@@ -390,8 +373,8 @@ class Store:
 
     # ------------------------------------------------------------ 快照
 
-    def snapshot(self, project: str, figure: str, note: str = "") -> Dict:
-        fdir = self.figure_dir(project, figure)
+    def snapshot(self, item_id: str, note: str = "") -> Dict:
+        fdir = self.figure_dir(item_id)
         ts = datetime.now().strftime("%Y-%m-%dT%H%M%S")
         dest = fdir / "history" / ts
         dest.mkdir(parents=True, exist_ok=True)
@@ -400,21 +383,11 @@ class Store:
             if src.exists():
                 shutil.copy(src, dest / name)
         (dest / "note.txt").write_text(note or "", encoding="utf-8")
+        repo_runs.add_snapshot(self.repo, item_id, now_iso(), note, f"history/{ts}")
         return {"id": ts, "note": note}
 
-    def snapshots(self, project: str, figure: str) -> List[Dict]:
-        hist = self.figure_dir(project, figure) / "history"
-        if not hist.is_dir():
-            return []
-        out = []
-        for d in sorted(hist.iterdir(), reverse=True):
-            if not d.is_dir():
-                continue
-            note_file = d / "note.txt"
-            out.append(
-                {
-                    "id": d.name,
-                    "note": note_file.read_text(encoding="utf-8") if note_file.exists() else "",
-                }
-            )
-        return out
+    def snapshots(self, item_id: str) -> List[Dict]:
+        return [
+            {"id": Path(row["dir"]).name, "note": row["note"]}
+            for row in repo_runs.list_snapshots(self.repo, item_id)
+        ]
