@@ -2,7 +2,7 @@
 
 每次 run 构建全新 HarnessRegistry（body 按 {module_id}:{key} 命名空间隔离，
 view.state 随 run 隔离）。review_harness=None 跳过一致性审核——固定管线，
-省一次 LLM 调用。persist=False 全内存零落盘；审计靠 Finalize 节点写 runs.jsonl
+省一次 LLM 调用。persist=False 全内存零落盘；审计靠 Finalize 节点写 fa_runs
 （Finalize 未 fire 的引擎级失败由 _audit_failure 补写，形状一致）。
 同一事件循环内只允许一个 AI run（per-loop asyncio.Lock 注册表）。
 
@@ -15,13 +15,12 @@ spec §12 的部分实现：五个代码 harness 设 validate_retries=1，引擎
 （围栏剥离→JSON 提取→尾部截断→带校验错误反馈重试一次）挡住"LLM 忘了去
 markdown 围栏"这类最常见坏输出；把坏 JSON 送进 fix 循环的完整实现需重构输出
 通道，留待真实 LLM smoke 后评估。残余引擎级失败由 _harvest_failure 收割
-具体 stderr（不泛化）、经 _audit_failure 落 runs.jsonl，可见可审计。
+具体 stderr（不泛化）、经 _audit_failure 落 fa_runs，可见可审计。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 import weakref
 from datetime import datetime
@@ -44,6 +43,7 @@ from module_harness.infra.events import (
     ScriptStarted,
 )
 
+from ..repo import runs as repo_runs
 from ..store import Store, now_iso
 from . import nodes, prompts
 from .llm import get_llm
@@ -200,9 +200,9 @@ TASKLISTS = {
 }
 
 
-def build_registry(kind: str, store: Store, project: str, figure: str,
+def build_registry(kind: str, store: Store, item_id: str,
                    spec: dict, llm_client, bus: EventBus) -> HarnessRegistry:
-    fdir = store.figure_dir(project, figure)
+    fdir = store.figure_dir(item_id)
     reg = HarnessRegistry(llm_client=llm_client, event_bus=bus)
     # standardize 产出 CSV，与渲染契约/gid/字体无关——用裸 config 不拼 CONTRACT；
     # 但它同样吃任意 LLM 输出，修复链照配（终审遗留：唯一没有 validate_retries 的 harness）
@@ -224,11 +224,11 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
     # parse_upload 节点在这两条 flow 里不会被 fire，空串安全
     reg.script("parse_upload")(nodes.make_parse_upload(fdir, spec.get("upload_name", "")))
     reg.script("write_data")(nodes.make_write_data(fdir))
-    reg.script("render_validate")(nodes.make_render_validate(store, fdir, project, figure))
-    reg.script("read_patch")(nodes.make_read_patch(store, project, figure))
+    reg.script("render_validate")(nodes.make_render_validate(store, item_id))
+    reg.script("read_patch")(nodes.make_read_patch(store, item_id))
     reg.script("merge_wb")(nodes.make_merge_wb(fdir))
-    reg.script("render_verify")(nodes.make_render_verify(store, project, figure))
-    reg.script("finalize")(nodes.make_finalize(fdir, kind))
+    reg.script("render_verify")(nodes.make_render_verify(store, item_id))
+    reg.script("finalize")(nodes.make_finalize(store, item_id, kind))
 
     for gname, gfn in (
         ("needs_fix", nodes.needs_fix),
@@ -240,13 +240,13 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
     return reg
 
 
-def _bridge(project: str, figure: str, run_id: str, bus: EventBus) -> None:
+def _bridge(item_id: str, run_id: str, bus: EventBus) -> None:
     """EventBus → WS hub：ai_run 事件（节点级进度）。"""
     from ..events import hub
 
     def push(payload: dict) -> None:
         hub.broadcast_threadsafe({
-            "type": "ai_run", "project": project, "figure": figure,
+            "type": "ai_run", "item": item_id,
             "runId": run_id, **payload,
         })
 
@@ -296,21 +296,16 @@ def _harvest_failure(firings: list) -> str:
     return ""
 
 
-def _audit_failure(store: Store, project: str, figure: str,
-                   kind: str, stderr: str) -> None:
-    """Finalize 未 fire 的失败补写 runs.jsonl（entry 形状与 nodes.finalize 一致）。"""
-    entry = {
-        "at": now_iso(), "kind": kind, "ok": False, "rounds": 0,
-        "stderr": stderr, "error_line": None, "notes": "",
-    }
+def _audit_failure(store: Store, item_id: str, kind: str, stderr: str) -> None:
+    """Finalize 未 fire 的失败补写 fa_runs（形状与 nodes.finalize 一致）。"""
     try:
-        with (store.figure_dir(project, figure) / "runs.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
+        repo_runs.add_run(store.repo, item_id, kind, False, 0, at=now_iso(),
+                          detail={"stderr": stderr, "error_line": None, "notes": ""})
+    except Exception:
         pass
 
 
-async def run_workflow(kind: str, store: Store, project: str, figure: str,
+async def run_workflow(kind: str, store: Store, item_id: str,
                        spec: dict, llm_client=None) -> dict:
     """执行一条工作流，返回 Finalize 节点的规范化结果。"""
     if kind not in TASKLISTS:
@@ -319,7 +314,7 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
         run_id = f"{kind}_{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:8]}"
         from ..events import hub
 
-        hub.broadcast_threadsafe({"type": "ai_run", "project": project, "figure": figure,
+        hub.broadcast_threadsafe({"type": "ai_run", "item": item_id,
                                   "runId": run_id, "phase": "run_start", "node": kind})
         finalized = False  # Finalize 是否亲自落过审计（防双写）
         try:
@@ -327,8 +322,8 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
             # 异常同样走统一失败出口，且必发 run_end（不裸逃逸成 500）
             client = llm_client or get_llm()
             bus = EventBus()
-            _bridge(project, figure, run_id, bus)
-            reg = build_registry(kind, store, project, figure, spec, client, bus)
+            _bridge(item_id, run_id, bus)
+            reg = build_registry(kind, store, item_id, spec, client, bus)
             module = Module(
                 spec=spec,
                 tasklist=TASKLISTS[kind](spec),
@@ -354,8 +349,8 @@ async def run_workflow(kind: str, store: Store, project: str, figure: str,
         except Exception as exc:  # LLM/构建错误统一失败出口
             result = {"kind": kind, "ok": False, "rounds": 0, "stderr": f"{type(exc).__name__}: {exc}"}
         if not finalized:
-            _audit_failure(store, project, figure, kind, result.get("stderr") or "")
-        hub.broadcast_threadsafe({"type": "ai_run", "project": project, "figure": figure,
+            _audit_failure(store, item_id, kind, result.get("stderr") or "")
+        hub.broadcast_threadsafe({"type": "ai_run", "item": item_id,
                                   "runId": run_id, "phase": "run_end", "node": kind,
                                   "ok": result.get("ok"), "detail": (result.get("stderr") or "")[:300]})
         return result

@@ -36,7 +36,7 @@ def now_iso() -> str:
 def _require_name(name: str, what: str) -> str:
     """名字进 SQL（不再是目录名），仅做基本卫生校验。"""
     n = name or ""
-    if not NAME_RE.match(n):
+    if not NAME_RE.fullmatch(n):
         raise ValueError(f"非法的{what}名：{name!r}")
     return n
 

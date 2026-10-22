@@ -8,13 +8,12 @@ from .svgkit import geom, identity, normalize, parse_svg, semantics
 from .store import Store
 
 
-def enrich_selection(store: Store, project: str, figure: str, selection: dict) -> dict:
+def enrich_selection(store: Store, item_id: str, selection: dict) -> dict:
     """富化单条选区。富化失败不影响调用方保存（带 warning）。"""
     enriched = dict(selection or {})
-    enriched.setdefault("project", project)
-    enriched.setdefault("figure", figure)
+    enriched.setdefault("item", item_id)
     warnings: list[str] = []
-    base_text = store.read_svg(project, figure, "final") or store.read_svg(project, figure, "base")
+    base_text = store.read_svg(item_id, "final") or store.read_svg(item_id, "base")
     if base_text:
         try:
             root = parse_svg(base_text)
@@ -24,7 +23,7 @@ def enrich_selection(store: Store, project: str, figure: str, selection: dict) -
                 enriched["elementId"] = el.get("id")
                 enriched["semanticPath"] = semantics.semantic_path(el)
                 enriched["fingerprint"] = identity.fingerprint(el)
-                enriched["nearby"] = _nearby(store, project, figure, el)
+                enriched["nearby"] = _nearby(el)
             else:
                 warnings.append("无法在当前 SVG 中定位选区元素（id 与语义路径均未命中）")
         except Exception as exc:  # 防御：选区富化失败不影响保存
@@ -33,7 +32,7 @@ def enrich_selection(store: Store, project: str, figure: str, selection: dict) -
     return enriched
 
 
-def _nearby(store: Store, project: str, figure: str, el) -> list[str]:
+def _nearby(el) -> list[str]:
     """语义邻居标签：按 bbox 中心距离排序取最近 5 个。"""
     root = el.getroottree().getroot()
     bbox = geom.estimate_bbox(el)

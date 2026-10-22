@@ -34,12 +34,11 @@ PROFILE = {"shape": [3, 2], "columns": [{"name": "dose", "dtype": "number", "uni
 
 
 def _make_store_fig(tmp_path):
-    """建 workspace/p/f 目录（init_figure 是 Task 4 的产物，这里手工建）。"""
+    """Store 建图（AI origin：无 plot.py），返回 (store, item_id, fdir)。"""
     ws = tmp_path / "ws"
     store = Store(ws)
-    fdir = ws / "p" / "f"
-    fdir.mkdir(parents=True)
-    return store, fdir
+    fid = store.create_figure("f", origin="ai")["id"]
+    return store, fid, store.figure_dir(fid)
 
 
 def test_parse_upload_csv(tmp_path):
@@ -78,14 +77,14 @@ def test_write_data(tmp_path):
 
 def test_render_validate_first_pass_renders_and_counts(tmp_path):
     """首轮（无 fix）用 gen 的代码；写盘渲染计数；返回值带 code。"""
-    store, fdir = _make_store_fig(tmp_path)
+    store, fid, fdir = _make_store_fig(tmp_path)
     good = (
         "import matplotlib\nmatplotlib.use('Agg')\n"
         "import matplotlib.pyplot as plt\n"
         "fig, ax = plt.subplots(figsize=(4, 3))\n"
         "ax.plot([0, 1], [0, 1])\nfig.tight_layout()\n"
     )
-    fn = nodes.make_render_validate(store, fdir, "p", "f")
+    fn = nodes.make_render_validate(store, fid)
     out = asyncio.run(fn(FakeView(fields={"gen": {"code": good}})))
     assert out["ok"] is True and out["rounds"] == 1 and out["source"] == "gen"
     assert out["code"] == good              # fix 循环的修复器要靠它拿当前代码
@@ -93,9 +92,9 @@ def test_render_validate_first_pass_renders_and_counts(tmp_path):
 
 
 def test_render_validate_prefers_fix_and_loop_limit(tmp_path):
-    store, fdir = _make_store_fig(tmp_path)
+    store, fid, fdir = _make_store_fig(tmp_path)
     bad = "fig = 1 +\n"
-    fn = nodes.make_render_validate(store, fdir, "p", "f")
+    fn = nodes.make_render_validate(store, fid)
     view = FakeView(fields={"gen": {"code": bad}, "fix": {"code": bad}})
     out1 = asyncio.run(fn(view))
     assert out1["ok"] is False and out1["source"] == "fix" and out1["rounds"] == 1
@@ -106,8 +105,8 @@ def test_render_validate_prefers_fix_and_loop_limit(tmp_path):
 
 
 def test_render_validate_no_code(tmp_path):
-    store, fdir = _make_store_fig(tmp_path)
-    fn = nodes.make_render_validate(store, fdir, "p", "f")
+    store, fid, fdir = _make_store_fig(tmp_path)
+    fn = nodes.make_render_validate(store, fid)
     out = asyncio.run(fn(FakeView(fields={})))
     assert out["ok"] is False and "未产出代码" in out["stderr"] and out["code"] == ""
 
@@ -122,14 +121,14 @@ def test_guards_xor():
 
 
 def test_writeback_nodes(tmp_path):
-    store, fdir = _make_store_fig(tmp_path)
-    store.save_patch("p", "f", {
+    store, fid, fdir = _make_store_fig(tmp_path)
+    store.save_patch(fid, {
         "baseHash": "",
         "ops": [{"id": "op-1", "kind": "set_style", "target": {"id": "fa:title"},
                  "attr": "font-size", "value": "18", "intent": "标题变大", "origin": "manual",
                  "status": "active"}],
     })
-    rp = nodes.make_read_patch(store, "p", "f")
+    rp = nodes.make_read_patch(store, fid)
     seed = rp(FakeView())
     assert len(seed["ops"]) == 1
 
@@ -157,15 +156,19 @@ def test_writeback_nodes(tmp_path):
     assert nodes.wb_done(FakeView(output=m4)) is True
 
 
-def test_finalize_writes_runs_jsonl(tmp_path):
-    store, fdir = _make_store_fig(tmp_path)
-    fn = nodes.make_finalize(fdir, "create")
+def test_finalize_writes_fa_runs(tmp_path):
+    store, fid, fdir = _make_store_fig(tmp_path)
+    fn = nodes.make_finalize(store, fid, "create")
     result = fn(FakeView(fields={"result": {"ok": True, "rounds": 2, "stderr": "", "notes": "done"}}))
     assert result["kind"] == "create" and result["ok"] is True
-    lines = (fdir / "runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1 and json.loads(lines[0])["kind"] == "create"
+    from figure_agent.repo import runs as repo_runs
 
-    fn_wb = nodes.make_finalize(fdir, "writeback")
+    runs = repo_runs.list_runs(store.repo, fid)
+    assert len(runs) == 1 and runs[0]["kind"] == "create"
+    assert runs[0]["ok"] is True and runs[0]["notes"] == "done"
+    assert not (fdir / "runs.jsonl").exists()  # 审计已进 SQL
+
+    fn_wb = nodes.make_finalize(store, fid, "writeback")
     r2 = fn_wb(FakeView(fields={"result": {"cleared": False, "rounds": 3, "remaining": 1, "stderr": "", "ok": True}}))
     assert r2["ok"] is False  # writeback 的 ok = cleared
 
@@ -174,8 +177,8 @@ def test_render_validate_tolerates_missing_sentinel(tmp_path):
     """真实引擎未点火 producer 返回 tickflow Missing（非 KeyError）——isinstance 防御须兜住。"""
     from tickflow.views import Missing
 
-    store, fdir = _make_store_fig(tmp_path)
-    fn = nodes.make_render_validate(store, fdir, "p", "f")
+    store, fid, fdir = _make_store_fig(tmp_path)
+    fn = nodes.make_render_validate(store, fid)
     out = asyncio.run(fn(FakeView(fields={"gen": {"code": ""}, "fix": Missing})))
     # fix 为 Missing（非 dict）→ 走 gen；gen.code 为空串 → 视为无代码
     assert out["ok"] is False and out["source"] == "gen" and "未产出代码" in out["stderr"]

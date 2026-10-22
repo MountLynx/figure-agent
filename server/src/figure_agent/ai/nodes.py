@@ -12,6 +12,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from ..repo import runs as repo_runs
 from ..store import Store, now_iso
 
 MAX_ROUNDS = 3  # 渲染修复 / 回写收敛的共同轮数上限
@@ -64,7 +65,7 @@ def make_write_data(fdir: Path):
     return write_data
 
 
-def make_render_validate(store: Store, fdir: Path, project: str, figure: str):
+def make_render_validate(store: Store, item_id: str):
     """取代码（fix 优先于 gen）→ 写盘渲染 → {ok, rounds, stderr, code, ...}。
 
     返回值必须带 "code"（本轮实际渲染的代码）：FixCode 的 prompt 经 {render}
@@ -91,7 +92,7 @@ def make_render_validate(store: Store, fdir: Path, project: str, figure: str):
         if not (isinstance(code, str) and code.strip()):
             return {"ok": False, "rounds": rounds, "stderr": "上游未产出代码",
                     "error_line": None, "source": source, "code": ""}
-        outcome = await asyncio.to_thread(store.write_code, project, figure, code)
+        outcome = await asyncio.to_thread(store.write_code, item_id, code)
         return {
             "ok": outcome.ok,
             "rounds": rounds,
@@ -107,9 +108,9 @@ def make_render_validate(store: Store, fdir: Path, project: str, figure: str):
 
 # ---------------------------------------------------------------- 回写链
 
-def make_read_patch(store: Store, project: str, figure: str):
+def make_read_patch(store: Store, item_id: str):
     def read_patch(view) -> dict:
-        patch = store.read_patch(project, figure) or {"ops": []}
+        patch = store.read_patch(item_id) or {"ops": []}
         return {"ops": patch.get("ops", [])}
 
     return read_patch
@@ -141,7 +142,7 @@ def make_merge_wb(fdir: Path):
     return merge_wb
 
 
-def make_render_verify(store: Store, project: str, figure: str):
+def make_render_verify(store: Store, item_id: str):
     """回写代码 → 渲染 → verify_patch 收敛判定。"""
 
     async def render_verify(view) -> dict:
@@ -152,12 +153,12 @@ def make_render_verify(store: Store, project: str, figure: str):
         if not (isinstance(code, str) and code.strip()):
             return {"ok": False, "cleared": False, "rounds": rounds, "remaining": -1,
                     "results": [], "stderr": "回写节点未产出代码"}
-        outcome = await asyncio.to_thread(store.write_code, project, figure, code)
+        outcome = await asyncio.to_thread(store.write_code, item_id, code)
         if not outcome.ok:
             return {"ok": False, "cleared": False, "rounds": rounds, "remaining": -1,
                     "results": [], "stderr": (outcome.stderr or "")[-4000:],
                     "error_line": outcome.error_line}
-        verdict = await asyncio.to_thread(store.verify_patch, project, figure)
+        verdict = await asyncio.to_thread(store.verify_patch, item_id)
         return {"ok": True, "cleared": bool(verdict.get("cleared")),
                 "rounds": rounds, "remaining": verdict.get("remainingOps", 0),
                 "results": verdict.get("results", []), "stderr": ""}
@@ -167,8 +168,8 @@ def make_render_verify(store: Store, project: str, figure: str):
 
 # ---------------------------------------------------------------- 终点
 
-def make_finalize(fdir: Path, kind: str):
-    """终点节点：规范化返回值 + 追加 runs.jsonl。writeback 的 ok = cleared。
+def make_finalize(store: Store, item_id: str, kind: str):
+    """终点节点：规范化返回值 + 审计进 fa_runs。writeback 的 ok = cleared。
 
     读 bind 字段 "result"（TaskDefinition inputs={"result": 上游节点}）——
     真实引擎的 NodeView 没有 .output 属性（那是 GuardView 的），body 里读
@@ -189,9 +190,13 @@ def make_finalize(fdir: Path, kind: str):
         if kind == "writeback":
             result["cleared"] = bool(o.get("cleared"))
             result["remaining"] = o.get("remaining", -1)
-        entry = {"at": now_iso(), **result}
-        with (fdir / "runs.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        detail = {"stderr": result["stderr"], "error_line": result.get("error_line"),
+                  "notes": result.get("notes", "")}
+        if kind == "writeback":
+            detail["cleared"] = result["cleared"]
+            detail["remaining"] = result["remaining"]
+        repo_runs.add_run(store.repo, item_id, kind, result["ok"],
+                          result["rounds"], at=now_iso(), detail=detail)
         return result
 
     return finalize
