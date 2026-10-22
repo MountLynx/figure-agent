@@ -89,3 +89,32 @@ def test_tolerates_unknown_columns(tmp_path):
     with repo.conn() as c:
         c.execute("ALTER TABLE items ADD COLUMN future_col TEXT")
     Repo(tmp_path / "ws").open_or_init()  # 不抛错
+
+
+def test_open_zero_byte_db(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / ".index").mkdir(parents=True)
+    (ws / ".index" / "index.db").write_bytes(b"")
+    Repo(ws).open_or_init()
+    with Repo(ws).conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM _sqlx_migrations").fetchone()[0] == 8
+
+
+def test_seed_self_heals_missing_field(tmp_path):
+    repo = Repo(tmp_path / "ws")
+    repo.open_or_init()
+    with repo.conn() as c:
+        c.execute(
+            "DELETE FROM fields WHERE name = '来源'"
+            " AND type_id = (SELECT id FROM item_types WHERE name = '图')"
+        )
+    Repo(tmp_path / "ws").open_or_init()  # 自愈：补回缺失字段
+    with repo.conn() as c:
+        fields = [
+            r["name"]
+            for r in c.execute(
+                "SELECT f.name FROM fields f JOIN item_types t ON t.id = f.type_id"
+                " WHERE t.name = '图' ORDER BY f.position"
+            )
+        ]
+    assert fields == ["模板", "来源", "最后渲染"]

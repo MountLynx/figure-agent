@@ -40,6 +40,7 @@ class Repo:
 
     @contextmanager
     def conn(self) -> Iterator[sqlite3.Connection]:
+        """打开连接。必须先成功调用 open_or_init()，否则对尚不存在的 index.db 操作会抛误导性错误。"""
         with open_conn(self.db_path) as c:
             yield c
 
@@ -87,16 +88,26 @@ class Repo:
 
 
 def _seed(conn: sqlite3.Connection) -> None:
-    """空库种子：「图」类型 + 三个字段。可重入（已有则跳过）。"""
-    if conn.execute("SELECT 1 FROM item_types WHERE name = ?", (FIGURE_TYPE_NAME,)).fetchone():
-        return
-    cur = conn.execute(
-        "INSERT INTO item_types (name, icon, namespace) VALUES (?, 'chart-bar', 'default')",
-        (FIGURE_TYPE_NAME,),
-    )
-    type_id = cur.lastrowid
-    for position, name in enumerate(FIGURE_FIELDS):
-        conn.execute(
-            "INSERT INTO fields (type_id, name, field_type, position) VALUES (?, ?, 'text', ?)",
-            (type_id, name, position),
+    """空库种子：「图」类型 + 三个字段。可重入且可自愈（缺失字段补齐）。"""
+    row = conn.execute(
+        "SELECT id FROM item_types WHERE name = ?", (FIGURE_TYPE_NAME,)
+    ).fetchone()
+    if row is None:
+        cur = conn.execute(
+            "INSERT INTO item_types (name, icon, namespace) VALUES (?, 'chart-bar', 'default')",
+            (FIGURE_TYPE_NAME,),
         )
+        type_id = cur.lastrowid
+        existing: set[str] = set()
+    else:
+        type_id = row["id"]
+        existing = {
+            r[0]
+            for r in conn.execute("SELECT name FROM fields WHERE type_id = ?", (type_id,))
+        }
+    for position, name in enumerate(FIGURE_FIELDS):
+        if name not in existing:
+            conn.execute(
+                "INSERT INTO fields (type_id, name, field_type, position) VALUES (?, ?, 'text', ?)",
+                (type_id, name, position),
+            )
