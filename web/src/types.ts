@@ -1,15 +1,57 @@
-// 共享类型定义
+// 共享类型定义（Index 仓库模式：条目 id 寻址）
 
-export interface FigureInfo {
-  name: string;
-  hasBase: boolean;
-  lastRenderAt: string | null;
-  opCount: number;
+export interface RepoInfo {
+  path: string;
+  itemCount: number;
+  dbVersion: number;
 }
 
-export interface ProjectInfo {
+export interface GroupInfo {
+  id: number;
+  parentId: number | null;
   name: string;
-  figures: FigureInfo[];
+  position: number;
+  boundItemId: number | null;
+}
+
+export interface TagInfo {
+  id: number;
+  name: string;
+}
+
+export interface FieldInfo {
+  id: number;
+  name: string;
+  fieldType: "text" | "checkbox" | "date" | "number" | "dropdown" | "item";
+  position: number;
+  label: string;
+  options: string[];
+}
+
+export interface TypeInfo {
+  id: number;
+  name: string;
+  icon: string;
+  fields: FieldInfo[];
+}
+
+export interface ItemInfo {
+  id: string;
+  name: string;
+  typeName: string;
+  groupIds: number[];
+  tags: string[];
+  properties: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+  hasBase?: boolean;
+  lastRenderAt?: string | null;
+  opCount?: number;
+}
+
+export interface FileInfo {
+  path: string;
+  isDir: boolean;
 }
 
 export interface TemplateInfo {
@@ -50,9 +92,11 @@ export interface SnapshotInfo {
 }
 
 export interface FigureDetail {
-  project: string;
-  figure: string;
-  meta: { name: string; project?: string; createdAt?: string; lastRenderAt?: string | null } | null;
+  id: string;
+  name: string;
+  properties: Record<string, string>;
+  groupIds: number[];
+  tags: string[];
   code: string | null;
   baseSvg: string | null;
   finalSvg: string | null;
@@ -82,8 +126,7 @@ export interface SelectionJSON {
   text?: { content: string | null; fontFamily: string | null; fontSize: string | null };
   fingerprint?: string;
   nearby?: string[];
-  project?: string;
-  figure?: string;
+  item?: string;
   warnings?: string[];
 }
 
@@ -102,6 +145,7 @@ export interface AiStatus {
 }
 
 export interface AiRunResult {
+  id?: string;
   kind: "create" | "adapt" | "edit" | "writeback";
   ok: boolean;
   rounds: number;
@@ -114,6 +158,7 @@ export interface AiRunResult {
 
 export interface RunEvent {
   runId: string;
+  item?: string;
   phase: "run_start" | "run_end" | "node_start" | "node_end" | "node_failed" | "llm_start" | "llm_end";
   node?: string;
   detail?: string;
