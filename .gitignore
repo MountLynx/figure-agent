@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# 渲染产物（可由 plot.py + 服务再生成）
+workspace/**/base.svg
+workspace/**/final.svg
+workspace/**/.render-tmp.svg
+
+# 前端
+web/node_modules/
+web/dist/
+
+# 系统
+.DS_Store
