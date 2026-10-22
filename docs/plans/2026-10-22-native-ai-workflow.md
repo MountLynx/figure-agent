@@ -489,9 +489,9 @@ def test_writeback_nodes(tmp_path):
     seed = rp(FakeView())
     assert len(seed["ops"]) == 1
 
-    merge = nodes.make_merge_wb(store, fdir, "p", "f")
+    merge = nodes.make_merge_wb(fdir)
     m1 = merge(FakeView(fields={"seed": seed}))          # 首轮：无 verify
-    assert m1["cleared"] is False and m1["rounds"] == 0 and "plot.py" in m1["code"] or m1["code"] == ""
+    assert m1["cleared"] is False and m1["rounds"] == 0
     assert nodes.wb_continue(FakeView(output=m1)) is True
     assert nodes.wb_done(FakeView(output=m1)) is False
 
@@ -506,7 +506,7 @@ def test_writeback_nodes(tmp_path):
     m3 = merge(FakeView(fields={"seed": seed, "verify": verify2}))
     assert nodes.wb_continue(FakeView(output=m3)) is False
     assert nodes.wb_done(FakeView(output=m3)) is True
-    assert nodes.wb_verify_settled(FakeView(output=verify2)) is True
+    # （wb_verify_settled 已删：直达边冗余且造成 Finalize 双 fire 双重审计）
 
     # 空 patch：直接收敛路径
     m4 = merge(FakeView(fields={"seed": {"ops": []}}))
@@ -550,10 +550,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from pathlib import Path
 
-from ..store import Store
+from ..store import Store, now_iso
 
 MAX_ROUNDS = 3  # 渲染修复 / 回写收敛的共同轮数上限
 
@@ -561,17 +560,24 @@ MAX_ROUNDS = 3  # 渲染修复 / 回写收敛的共同轮数上限
 # ---------------------------------------------------------------- 造图链
 
 def make_parse_upload(fdir: Path, upload_name: str):
-    """uploads/<upload_name> → 表格文本。二进制表格走 pandas，其余按文本读。"""
-    path = fdir / "uploads" / upload_name
+    """uploads/<upload_name> → 表格文本。二进制表格走 pandas，其余按文本读。
+
+    upload_name 来自 REST 层的 Path(...).name，但工厂内再做一次逃逸防御。
+    只支持 .xlsx（openpyxl 后端）；遗留 .xls 需要 xlrd，不装（明确拒绝）。
+    """
+    path = (fdir / "uploads" / upload_name).resolve()
+    path.relative_to((fdir / "uploads").resolve())  # 逃逸 uploads/ 直接抛错
 
     async def parse_upload(view) -> str:
         def _read() -> str:
             suffix = path.suffix.lower()
-            if suffix in (".xlsx", ".xls"):
+            if suffix == ".xlsx":
                 import pandas as pd
 
                 df = pd.read_excel(path)
                 return df.to_csv(index=False)
+            if suffix in (".xls",):
+                raise ValueError("不支持遗留 .xls 格式，请另存为 .xlsx")
             return path.read_text(encoding="utf-8", errors="replace")
 
         return await asyncio.to_thread(_read)
@@ -584,6 +590,8 @@ def make_write_data(fdir: Path):
 
     def write_data(view) -> dict:
         out = view.field("data")  # Standardize 输出 {csv, profile, notes}
+        if not isinstance(out, dict):
+            raise TypeError(f"Standardize 上游输出非 dict：{type(out).__name__}")
         profile = dict(out.get("profile") or {})
         merged = (str(profile.get("notes", "")) + " " + str(out.get("notes", ""))).strip()
         profile["notes"] = merged
@@ -647,7 +655,7 @@ def make_read_patch(store: Store, project: str, figure: str):
     return read_patch
 
 
-def make_merge_wb(store: Store, fdir: Path, project: str, figure: str):
+def make_merge_wb(fdir: Path):
     """合并种子 ops 与最新校验结果；附当前代码；计数轮数（跨 tick 持久）。"""
 
     def merge_wb(view) -> dict:
@@ -671,7 +679,7 @@ def make_merge_wb(store: Store, fdir: Path, project: str, figure: str):
     return merge_wb
 
 
-def make_render_verify(store: Store, fdir: Path, project: str, figure: str):
+def make_render_verify(store: Store, project: str, figure: str):
     """回写代码 → 渲染 → verify_patch 收敛判定。"""
 
     async def render_verify(view) -> dict:
@@ -698,10 +706,16 @@ def make_render_verify(store: Store, fdir: Path, project: str, figure: str):
 # ---------------------------------------------------------------- 终点
 
 def make_finalize(fdir: Path, kind: str):
-    """终点节点：规范化返回值 + 追加 runs.jsonl。writeback 的 ok = cleared。"""
+    """终点节点：规范化返回值 + 追加 runs.jsonl。writeback 的 ok = cleared。
+
+    读 bind 字段 "result"（TaskDefinition inputs={"result": 上游节点}）——
+    真实引擎的 NodeView 没有 .output 属性（那是 GuardView 的），body 里读
+    view.output 会 AttributeError 静默失败（评审仿真发现）。
+    """
 
     def finalize(view) -> dict:
-        o = view.output if isinstance(view.output, dict) else {}
+        o = view.field("result")
+        o = o if isinstance(o, dict) else {}
         result = {
             "kind": kind,
             "ok": bool(o.get("cleared")) if kind == "writeback" else bool(o.get("ok")),
@@ -713,7 +727,7 @@ def make_finalize(fdir: Path, kind: str):
         if kind == "writeback":
             result["cleared"] = bool(o.get("cleared"))
             result["remaining"] = o.get("remaining", -1)
-        entry = {"at": datetime.now().isoformat(timespec="seconds"), **result}
+        entry = {"at": now_iso(), **result}
         with (fdir / "runs.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         return result
@@ -743,17 +757,12 @@ def wb_continue(view) -> bool:
 
 def wb_done(view) -> bool:
     return not wb_continue(view)  # 严格互补
-
-
-def wb_verify_settled(view) -> bool:
-    o = _out(view)
-    return bool(o.get("cleared")) or o.get("rounds", 0) >= MAX_ROUNDS
 ```
 
 - [ ] **Step 4: 运行测试通过**
 
 Run: `cd server && .venv/Scripts/python -m pytest tests/test_ai_nodes.py -q`
-Expected: 8 passed
+Expected: 10 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1021,12 +1030,16 @@ def _tl_create(spec: dict) -> Tasklist:
                                       inputs={"render": "RenderValidate"}),
             "RenderValidate": TaskDefinition(type="script", script="render_validate",
                                              inputs={"gen": "GenCode", "fix": "FixCode"}),
-            "Finalize": TaskDefinition(type="script", script="finalize"),
+            "Finalize": TaskDefinition(type="script", script="finalize",
+                                       inputs={"result": "RenderValidate"}),
         },
         flow=(
             "[ParseUpload] --> Standardize --> WriteData --> GenCode --> RenderValidate\n"
             "RenderValidate --|needs_fix|--> FixCode --> RenderValidate\n"
-            "RenderValidate --|settled|--> Finalize"
+            "RenderValidate --|settled|--> Finalize\n"
+            # RenderValidate 双 producer（GenCode+FixCode）默认 AND join 会死锁：
+            # 首轮 FixCode 未 fire 永不满足。OR join = 任一 producer fire 即触发。
+            "RenderValidate.join: OR"
         ),
     )
 
@@ -1047,12 +1060,14 @@ def _tl_adapt(spec: dict) -> Tasklist:
                                       inputs={"render": "RenderValidate"}),
             "RenderValidate": TaskDefinition(type="script", script="render_validate",
                                              inputs={"gen": "AdaptCode", "fix": "FixCode"}),
-            "Finalize": TaskDefinition(type="script", script="finalize"),
+            "Finalize": TaskDefinition(type="script", script="finalize",
+                                       inputs={"result": "RenderValidate"}),
         },
         flow=(
             "[ParseUpload] --> Standardize --> WriteData --> AdaptCode --> RenderValidate\n"
             "RenderValidate --|needs_fix|--> FixCode --> RenderValidate\n"
-            "RenderValidate --|settled|--> Finalize"
+            "RenderValidate --|settled|--> Finalize\n"
+            "RenderValidate.join: OR"
         ),
     )
 
@@ -1068,12 +1083,14 @@ def _tl_edit(spec: dict) -> Tasklist:
                                       inputs={"render": "RenderValidate"}),
             "RenderValidate": TaskDefinition(type="script", script="render_validate",
                                              inputs={"gen": "EditCode", "fix": "FixCode"}),
-            "Finalize": TaskDefinition(type="script", script="finalize"),
+            "Finalize": TaskDefinition(type="script", script="finalize",
+                                       inputs={"result": "RenderValidate"}),
         },
         flow=(
             "[EditCode] --> RenderValidate\n"
             "RenderValidate --|needs_fix|--> FixCode --> RenderValidate\n"
-            "RenderValidate --|settled|--> Finalize"
+            "RenderValidate --|settled|--> Finalize\n"
+            "RenderValidate.join: OR"
         ),
     )
 
@@ -1088,16 +1105,17 @@ def _tl_writeback(spec: dict) -> Tasklist:
                                         inputs={"material": "Merge"}),
             "RenderVerify": TaskDefinition(type="script", script="render_verify",
                                            inputs={"translated": "Translate"}),
-            "Finalize": TaskDefinition(type="script", script="finalize"),
+            # Finalize 只从 Merge 的 wb_done 边进入（wb_verify_settled 直达边在
+            # 评审仿真中被证明冗余且会造成 Finalize 双 fire 双重审计，已删）
+            "Finalize": TaskDefinition(type="script", script="finalize",
+                                       inputs={"result": "Merge"}),
         },
         flow=(
             "[ReadPatch] --> Merge\n"
             "Merge --|wb_continue|--> Translate --> RenderVerify\n"
             "RenderVerify --> Merge\n"
             "Merge --|wb_done|--> Finalize\n"
-            "RenderVerify --|wb_verify_settled|--> Finalize\n"
-            "Merge.join: OR\n"
-            "Finalize.join: OR"
+            "Merge.join: OR"
         ),
     )
 
@@ -1132,8 +1150,8 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
     reg.script("write_data")(nodes.make_write_data(fdir))
     reg.script("render_validate")(nodes.make_render_validate(store, fdir, project, figure))
     reg.script("read_patch")(nodes.make_read_patch(store, project, figure))
-    reg.script("merge_wb")(nodes.make_merge_wb(store, fdir, project, figure))
-    reg.script("render_verify")(nodes.make_render_verify(store, fdir, project, figure))
+    reg.script("merge_wb")(nodes.make_merge_wb(fdir))
+    reg.script("render_verify")(nodes.make_render_verify(store, project, figure))
     reg.script("finalize")(nodes.make_finalize(fdir, kind))
 
     for gname, gfn in (
@@ -1141,7 +1159,6 @@ def build_registry(kind: str, store: Store, project: str, figure: str,
         ("settled", nodes.settled),
         ("wb_continue", nodes.wb_continue),
         ("wb_done", nodes.wb_done),
-        ("wb_verify_settled", nodes.wb_verify_settled),
     ):
         reg.guard(gname, gfn)
     return reg
