@@ -59,6 +59,8 @@ export default function App() {
     async (project: string, figure: string, keepOps = false) => {
       try {
         const d = await api.getFigure(project, figure);
+        const cur = stateRef.current.current; // 守卫：响应期间用户已切图 → 丢弃过期响应，防跨图 detail/ops 污染
+        if (cur && (cur.project !== project || cur.figure !== figure)) return;
         setDetail(d);
         if (!keepOps) {
           setOps(d.patch.ops ?? []);
