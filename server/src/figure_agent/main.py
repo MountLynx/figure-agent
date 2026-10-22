@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -107,8 +108,10 @@ async def create_figure(project: str, body: FigureCreate):
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
-async def _save_upload(fdir: Path, upload: UploadFile) -> str:
-    name = Path(upload.filename or "data.csv").name
+async def _save_upload(fdir: Path, upload: UploadFile, default_name: str = "data.csv") -> str:
+    name = Path(upload.filename or "").name
+    if not name or name in {".", ".."}:
+        name = default_name
     data = await upload.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=400, detail="上传文件超过 10MB 限制")
@@ -126,7 +129,12 @@ async def create_figure_ai(project: str, name: str = Form(...),
         store.init_figure(project, name, origin="ai")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    upload_name = await _save_upload(store.figure_dir(project, name), data)
+    fdir = store.figure_dir(project, name)
+    try:
+        upload_name = await _save_upload(fdir, data)
+    except HTTPException:
+        shutil.rmtree(fdir, ignore_errors=True)  # 回滚刚建的空图目录
+        raise
     result = await run_workflow(
         "create", store, project, name,
         {"requirements": requirements, "upload_name": upload_name},
@@ -146,15 +154,18 @@ async def adapt_figure(project: str, name: str = Form(...),
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     fdir = store.figure_dir(project, name)
-    upload_name = await _save_upload(fdir, data)
-    script_bytes = await script.read()
-    if len(script_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=400, detail="脚本超过 10MB 限制")
-    (fdir / "uploads" / Path(script.filename or "plot.py").name).write_bytes(script_bytes)
+    try:
+        upload_name = await _save_upload(fdir, data)
+        script_name = await _save_upload(fdir, script, default_name="plot.py")
+        script_text = (fdir / "uploads" / script_name).read_text(encoding="utf-8",
+                                                                  errors="replace")
+    except HTTPException:
+        shutil.rmtree(fdir, ignore_errors=True)  # 回滚刚建的空图目录
+        raise
     result = await run_workflow(
         "adapt", store, project, name,
         {"requirements": requirements, "upload_name": upload_name,
-         "script_text": script_bytes.decode("utf-8", errors="replace")},
+         "script_text": script_text},
     )
     await _notify({"type": "figure_updated" if result.get("ok") else "render_error",
                    "project": project, "figure": name})
@@ -269,6 +280,9 @@ async def snapshot(project: str, figure: str, body: SnapshotPost):
 @app.post("/api/figure/{project}/{figure}/instruct")
 async def instruct(project: str, figure: str, body: InstructPost):
     _figure_or_404(project, figure)
+    code = _safe_code(project, figure)
+    if code is None:
+        raise HTTPException(status_code=400, detail="图尚无 plot.py（首次 AI 运行未成功），无法执行指令")
     items = body.selection if isinstance(body.selection, list) else [body.selection]
     enriched = [
         enrich.enrich_selection(store, project, figure, item) for item in items
@@ -278,7 +292,7 @@ async def instruct(project: str, figure: str, body: InstructPost):
         {
             "instruction": body.instruction,
             "selection_json": json.dumps(enriched, ensure_ascii=False),
-            "code": store.read_code(project, figure),
+            "code": code,
         },
     )
     await _notify({"type": "figure_updated" if result.get("ok") else "render_error",
@@ -290,7 +304,8 @@ async def instruct(project: str, figure: str, body: InstructPost):
 async def writeback(project: str, figure: str):
     _figure_or_404(project, figure)
     result = await run_workflow("writeback", store, project, figure, {})
-    await _notify({"type": "figure_updated", "project": project, "figure": figure})
+    await _notify({"type": "figure_updated" if result.get("ok") else "render_error",
+                   "project": project, "figure": figure})
     return result
 
 
@@ -309,7 +324,9 @@ def list_runs(project: str, figure: str):
     if not path.exists():
         return []
     out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # read_bytes+replace 解码：并发写 runs.jsonl 时 read_text 可能撕裂多字节
+    # UTF-8 序列导致 UnicodeDecodeError → 500
+    for line in path.read_bytes().decode("utf-8", errors="replace").splitlines():
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:

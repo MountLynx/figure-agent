@@ -170,6 +170,17 @@ def test_writeback_endpoint(client, monkeypatch):
     assert body["cleared"] is True and body["ok"] is True
 
 
+def test_instruct_without_plot_py_400(client):
+    # AI create/adapt 失败会留下有 meta 无 plot.py 的图目录：instruct 应 400 而非 500
+    from figure_agent.main import store
+
+    store.init_figure("demo", "no-plot", origin="ai")
+    sel = {"elementId": "fa:treatment-bar-1", "semanticPath": "figure_1/axes_1/fa:treatment-bar-1"}
+    r = client.post("/api/figure/demo/no-plot/instruct",
+                    json={"instruction": "改红", "selection": sel})
+    assert r.status_code == 400, r.text
+
+
 def test_enrich_selection_stateless(client):
     client.post("/api/projects/demo/figures", json={"name": "bars", "template": "bar-groups"})
     sel = {"elementId": "fa:treatment-bar-2", "semanticPath": "figure_1/axes_1/fa:treatment-bar-2"}
