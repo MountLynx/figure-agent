@@ -1,12 +1,13 @@
-// App：状态编排。图详情获取、WS 自动刷新（断连降级轮询）、undo/redo、导出。
+// App：双视图编排。管理视图（Index 三栏）/ 编辑器视图（画布+AI+微调）。
+// 编辑器逻辑与旧版一致，仅寻址从 (project, figure) 改为 item id。
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Viewer, type ElementNode } from "./components/Viewer";
-import { Sidebar } from "./components/Sidebar";
 import { EditorPanel } from "./components/EditorPanel";
 import { AIPanel } from "./components/AIPanel";
-import type { FigureDetail, Op, ProjectInfo, RunEvent, SelectionJSON, TemplateInfo, VerifyResponse } from "./types";
+import { ManageView } from "./components/manage/ManageView";
+import type { FigureDetail, Op, RunEvent, SelectionJSON, VerifyResponse } from "./types";
 
 interface HistoryEntry {
   ops: Op[];
@@ -14,9 +15,12 @@ interface HistoryEntry {
 }
 
 export default function App() {
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
-  const [current, setCurrent] = useState<{ project: string; figure: string } | null>(null);
+  const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
+  if (!target) return <ManageView onOpen={(id, name) => setTarget({ id, name })} />;
+  return <EditorApp target={target} onBack={() => setTarget(null)} />;
+}
+
+function EditorApp({ target, onBack }: { target: { id: string; name: string }; onBack: () => void }) {
   const [detail, setDetail] = useState<FigureDetail | null>(null);
   const [ops, setOps] = useState<Op[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -35,32 +39,22 @@ export default function App() {
   const [selectReq, setSelectReq] = useState<{ path: string; nonce: number } | null>(null);
   const [aiEvents, setAiEvents] = useState<RunEvent[]>([]);
   const [runActive, setRunActive] = useState(false);
-  const stateRef = useRef({ current, dirty: false });
+  const stateRef = useRef({ id: target.id, dirty: false });
   // dirty = 本地 ops 与服务器 patch 不一致（保存按钮/WS 自动刷新共用此语义）
   const dirty = JSON.stringify(ops) !== JSON.stringify(detail?.patch.ops ?? []);
-  stateRef.current = { current, dirty };
+  stateRef.current = { id: target.id, dirty };
 
   const showToast = useCallback((msg: string, error = false) => {
     setToast({ msg, error });
     window.setTimeout(() => setToast(null), 3200);
   }, []);
 
-  const refreshProjects = useCallback(() => {
-    api.listProjects().then(setProjects).catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    refreshProjects();
-    api.listTemplates().then(setTemplates).catch(() => undefined);
-  }, [refreshProjects]);
-
   // ---- 图详情加载 ----
   const loadFigure = useCallback(
-    async (project: string, figure: string, keepOps = false) => {
+    async (id: string, keepOps = false) => {
       try {
-        const d = await api.getFigure(project, figure);
-        const cur = stateRef.current.current; // 守卫：响应期间用户已切图 → 丢弃过期响应，防跨图 detail/ops 污染
-        if (cur && (cur.project !== project || cur.figure !== figure)) return;
+        const d = await api.getFigure(id);
+        if (stateRef.current.id !== id) return; // 守卫：响应期间已切图 → 丢弃过期响应
         setDetail(d);
         if (!keepOps) {
           setOps(d.patch.ops ?? []);
@@ -76,19 +70,18 @@ export default function App() {
     [showToast]
   );
 
-  const selectFigure = useCallback(
-    (project: string, figure: string) => {
-      setCurrent({ project, figure });
-      setSelections([]);
-      setSelectionPaths([]);
-      setElements([]);
-      setVersion((v) => v + 1);
-      loadFigure(project, figure);
-    },
-    [loadFigure]
-  );
+  useEffect(() => {
+    setSelections([]);
+    setSelectionPaths([]);
+    setElements([]);
+    setVersion((v) => v + 1); // 图切换代数 +1：Viewer 据此重置内部缓存（与旧版 selectFigure 语义一致）
+    loadFigure(target.id);
+  }, [target.id, loadFigure]);
 
   // ---- WS 自动刷新 + 轮询降级 ----
+  const detailRef = useRef<FigureDetail | null>(null);
+  detailRef.current = detail;
+
   useEffect(() => {
     let ws: WebSocket | null = null;
     let poll: number | null = null;
@@ -98,24 +91,25 @@ export default function App() {
       try {
         const data = JSON.parse(ev.data);
         if (data.type === "ai_run") {
-          // AI run 事件不依赖当前选图（造图/改造可以在无选中图时发起），
-          // 放在 early return 之前，保证 run_end 一定能复位 runActive。
           setAiEvents((prev) => [...prev.slice(-199), { at: Date.now(), ...data }]);
           if (data.phase === "run_end") {
             setRunActive(false);
-            const cur = stateRef.current.current;
-            if (cur && data.project === cur.project && data.figure === cur.figure) {
-              loadFigure(cur.project, cur.figure, stateRef.current.dirty);
+            const id = stateRef.current.id;
+            if (id && (!data.item || data.item === id)) {
+              loadFigure(id, stateRef.current.dirty);
             }
-            refreshProjects();
           }
           return;
         }
-        const cur = stateRef.current.current;
-        if (!cur) return;
-        if (data.type === "figure_updated" && data.project === cur.project && data.figure === cur.figure) {
+        const id = stateRef.current.id;
+        if (!id) return;
+        if (data.type === "figure_updated" && data.item === id) {
           if (stateRef.current.dirty) setStaleServer(true);
-          else loadFigure(cur.project, cur.figure);
+          else loadFigure(id);
+        }
+        if (data.type === "figure_deleted" && data.item === id) {
+          showToast("该图已被删除", true);
+          onBack();
         }
       } catch {
         /* ignore */
@@ -128,8 +122,6 @@ export default function App() {
       ws = new WebSocket(`${proto}://${location.host}/ws`);
       ws.onopen = () => {
         setWsOnline(true);
-        // 兜底：WS 断连窗口可能丢 run_end 事件，重连时复位运行锁
-        //（此时上次 run 要么已结束，要么结果会经轮询/figure_updated 刷新）
         setRunActive(false);
         if (poll) {
           window.clearInterval(poll);
@@ -140,15 +132,15 @@ export default function App() {
       ws.onclose = () => {
         setWsOnline(false);
         if (!closed && !poll) {
-          // 降级轮询（§9 WS 断连）
+          // 降级轮询（WS 断连）
           poll = window.setInterval(() => {
-            const cur = stateRef.current.current;
-            if (!cur) return;
+            const id = stateRef.current.id;
+            if (!id) return;
             api
-              .getFigure(cur.project, cur.figure)
+              .getFigure(id)
               .then((d) => {
                 const fresh = JSON.stringify(d.patch) !== JSON.stringify(detailRef.current?.patch);
-                if (fresh && !stateRef.current.dirty) loadFigure(cur.project, cur.figure);
+                if (fresh && !stateRef.current.dirty) loadFigure(id);
               })
               .catch(() => undefined);
           }, 3000);
@@ -164,9 +156,6 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const detailRef = useRef<FigureDetail | null>(null);
-  detailRef.current = detail;
 
   // ---- ops 编辑（undo/redo 栈）----
   const pushHistory = useCallback((next: Op[], label: string) => {
@@ -232,66 +221,61 @@ export default function App() {
 
   // ---- 保存 / 校验 / 快照 ----
   const save = useCallback(async () => {
-    if (!current) return;
     setBusy(true);
     try {
       const baseHash = detail?.patch.baseHash ?? "";
-      await api.putPatch(current.project, current.figure, { baseHash, ops });
-      await loadFigure(current.project, current.figure);
+      await api.putPatch(target.id, { baseHash, ops });
+      await loadFigure(target.id);
       setHistory([{ ops, label: "已保存" }]);
       setHistIdx(0);
       showToast("patch 已保存");
-      refreshProjects();
     } catch (e) {
       showToast(`保存失败：${(e as Error).message}`, true);
     } finally {
       setBusy(false);
     }
-  }, [current, detail, ops, loadFigure, showToast, refreshProjects]);
+  }, [target, detail, ops, loadFigure, showToast]);
 
   const verify = useCallback(async () => {
-    if (!current) return;
     setBusy(true);
     try {
-      const v = await api.verifyPatch(current.project, current.figure);
+      const v = await api.verifyPatch(target.id);
       setLastVerify(v);
-      await loadFigure(current.project, current.figure);
-      refreshProjects();
+      await loadFigure(target.id);
       showToast(v.cleared ? "patch 已收敛清空" : `剩余 ${v.remainingOps} 个 op`);
     } catch (e) {
       showToast(`校验失败：${(e as Error).message}`, true);
     } finally {
       setBusy(false);
     }
-  }, [current, loadFigure, showToast, refreshProjects]);
+  }, [target, loadFigure, showToast]);
 
   const snapshot = useCallback(
     async (note: string) => {
-      if (!current) return;
       try {
-        await api.snapshot(current.project, current.figure, note);
-        await loadFigure(current.project, current.figure, true);
+        await api.snapshot(target.id, note);
+        await loadFigure(target.id, true);
         showToast("快照已保存");
       } catch (e) {
         showToast(`快照失败：${(e as Error).message}`, true);
       }
     },
-    [current, loadFigure, showToast]
+    [target, loadFigure, showToast]
   );
 
   // ---- 选区 ----
   const onSelection = useCallback(
     (jsons: SelectionJSON[]) => {
-      if (!current || jsons.length === 0) return;
+      if (jsons.length === 0) return;
       setSelectionPaths(jsons.map((j) => j.semanticPath));
       // 单选保持对象形状（兼容服务端旧契约），多选传数组
       const payload = jsons.length === 1 ? jsons[0] : jsons;
       api
-        .enrichSelection(current.project, current.figure, payload)
+        .enrichSelection(target.id, payload)
         .then((enriched) => setSelections(Array.isArray(enriched) ? enriched : [enriched]))
         .catch(() => setSelections(jsons));
     },
-    [current]
+    [target]
   );
 
   const onClearSelection = useCallback(() => {
@@ -301,11 +285,10 @@ export default function App() {
 
   // ---- 导出 ----
   const getExportSvg = useCallback(async (): Promise<{ text: string; w: number; h: number } | null> => {
-    if (!current) return null;
     if (dirty) {
       await save();
     }
-    const d = await api.getFigure(current.project, current.figure);
+    const d = await api.getFigure(target.id);
     const text = d.finalSvg ?? d.baseSvg;
     if (!text) return null;
     const doc = new DOMParser().parseFromString(text, "image/svg+xml");
@@ -318,14 +301,14 @@ export default function App() {
       h = vb[3];
     }
     return { text, w: w || 400, h: h || 300 };
-  }, [current, dirty, save]);
+  }, [target, dirty, save]);
 
   const exportSvg = useCallback(async () => {
     const out = await getExportSvg();
     if (!out) return;
-    downloadBlob(new Blob([out.text], { type: "image/svg+xml" }), `${current?.figure ?? "figure"}.svg`);
+    downloadBlob(new Blob([out.text], { type: "image/svg+xml" }), `${target.name}.svg`);
     showToast("SVG 已导出");
-  }, [getExportSvg, current, showToast]);
+  }, [getExportSvg, target, showToast]);
 
   const exportPng = useCallback(async () => {
     const out = await getExportSvg();
@@ -344,7 +327,7 @@ export default function App() {
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
       canvas.toBlob((b) => {
-        if (b) downloadBlob(b, `${current?.figure ?? "figure"}.png`);
+        if (b) downloadBlob(b, `${target.name}.png`);
         showToast("PNG 已导出");
       }, "image/png");
     };
@@ -353,42 +336,17 @@ export default function App() {
       showToast("PNG 导出失败", true);
     };
     img.src = url;
-  }, [getExportSvg, current, showToast]);
-
-  // ---- 建图 ----
-  const createFigure = useCallback(
-    async (project: string, name: string, template: string) => {
-      setBusy(true);
-      try {
-        const r = await api.createFigure(project, name, template);
-        if (!r.ok) showToast(`建图渲染失败：${r.stderr.slice(0, 200)}`, true);
-        await refreshProjects();
-        selectFigure(project, name);
-      } catch (e) {
-        showToast(`建图失败：${(e as Error).message}`, true);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refreshProjects, selectFigure, showToast]
-  );
+  }, [getExportSvg, target, showToast]);
 
   const renderError = detail?.renderError;
+  const current = { id: target.id, name: target.name };
 
   return (
-    <div className="app">
-      <Sidebar
-        projects={projects}
-        templates={templates}
-        current={current}
-        onSelect={selectFigure}
-        onCreate={createFigure}
-        onRefresh={refreshProjects}
-      />
-
+    <div className="app editor">
       <div className="main">
         <div className="toolbar">
-          <b>{current ? `${current.project} / ${current.figure}` : "figure-agent"}</b>
+          <button onClick={onBack}>← 管理</button>
+          <b>{target.name}</b>
           <span className="hint">{wsOnline ? "WS 已连接" : "WS 断开（轮询中）"}</span>
           <span className="spacer" />
           <label className="toggle">
@@ -401,18 +359,16 @@ export default function App() {
           </label>
           <button
             onClick={async () => {
-              if (!current) return;
               setBusy(true);
               try {
-                const r = await api.run(current.project, current.figure);
+                const r = await api.run(target.id);
                 showToast(r.ok ? "重渲染完成" : `渲染失败：${r.stderr.slice(0, 160)}`, !r.ok);
-                await loadFigure(current.project, current.figure, stateRef.current.dirty);
-                refreshProjects();
+                await loadFigure(target.id, stateRef.current.dirty);
               } finally {
                 setBusy(false);
               }
             }}
-            disabled={!current || busy || runActive}
+            disabled={busy || runActive}
           >
             重渲染
           </button>
@@ -424,7 +380,7 @@ export default function App() {
             <button
               className="small"
               style={{ marginLeft: 8 }}
-              onClick={() => current && loadFigure(current.project, current.figure)}
+              onClick={() => loadFigure(target.id)}
             >
               放弃本地修改并刷新
             </button>
@@ -433,31 +389,21 @@ export default function App() {
 
         {renderError && <div className="render-error">渲染失败：{renderError}</div>}
 
-        {current ? (
-          <Viewer
-            baseSvg={detail?.baseSvg ?? null}
-            ops={ops}
-            showBase={showBase}
-            preciseMode={preciseMode}
-            selectionPaths={selectionPaths}
-            onSelection={onSelection}
-            onClearSelection={onClearSelection}
-            version={version}
-            onElements={setElements}
-            selectRequest={selectReq}
-          />
-        ) : (
-          <div style={{ display: "grid", placeItems: "center", flex: 1 }} className="hint">
-            <div>
-              <h2>figure-agent</h2>
-              <p>从左侧选择一张图开始。没有图？从模板创建一张。</p>
-            </div>
-          </div>
-        )}
+        <Viewer
+          baseSvg={detail?.baseSvg ?? null}
+          ops={ops}
+          showBase={showBase}
+          preciseMode={preciseMode}
+          selectionPaths={selectionPaths}
+          onSelection={onSelection}
+          onClearSelection={onClearSelection}
+          version={version}
+          onElements={setElements}
+          selectRequest={selectReq}
+        />
       </div>
 
       <AIPanel
-        projects={projects}
         current={current}
         selections={selections}
         patchOpCount={detail?.patch.ops.length ?? 0}
@@ -466,13 +412,10 @@ export default function App() {
         wsOnline={wsOnline}
         onRunStart={() => setRunActive(true)}
         onRunEnd={() => setRunActive(false)}
-        onFigureReady={(p, f) => selectFigure(p, f)}
         onFigureChanged={() => {
-          refreshProjects();
-          // 经 ref 取最新选图：run 中途切图后，旧闭包里的 current 会把旧图
+          // 经 ref 取最新 id：run 中途切图后，旧闭包里的 id 会把旧图
           // detail/ops 覆盖到新图上下文（再点保存就把旧图 ops 存进新图）
-          const cur = stateRef.current.current;
-          if (cur) loadFigure(cur.project, cur.figure, stateRef.current.dirty);
+          loadFigure(stateRef.current.id, stateRef.current.dirty);
         }}
         showToast={showToast}
       />
@@ -501,7 +444,6 @@ export default function App() {
         onSnapshot={snapshot}
         onCopySelection={() => {
           if (selections.length === 0) return;
-          // 单选复制单个对象；多选复制数组，每条都是各自元素的完整 JSON
           const payload = selections.length === 1 ? selections[0] : selections;
           navigator.clipboard
             .writeText(JSON.stringify(payload, null, 2))
