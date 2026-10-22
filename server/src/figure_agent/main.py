@@ -78,6 +78,13 @@ def list_templates():
     return store.templates()
 
 
+@app.get("/api/ai/status")
+def ai_status():
+    from .ai import llm as ai_llm
+
+    return ai_llm.ai_status()
+
+
 @app.post("/api/projects/{project}/figures")
 async def create_figure(project: str, body: FigureCreate):
     try:
