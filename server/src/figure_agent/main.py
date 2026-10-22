@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, session
+from . import config, enrich
+from .ai.workflows import run_workflow
 from .events import hub
 from .store import Store
 
@@ -34,9 +36,16 @@ class CodePut(BaseModel):
 
 
 class SelectionPost(BaseModel):
-    project: str
-    figure: str
+    # enrich-selection 端点以路径参数为准；前端旧形状 {project, figure,
+    # selection} 仍可带这两个字段，故为可选
+    project: str = ""
+    figure: str = ""
     # 单选为对象（旧契约）；多选为对象数组
+    selection: dict | list[dict] = Field(default_factory=dict)
+
+
+class InstructPost(BaseModel):
+    instruction: str
     selection: dict | list[dict] = Field(default_factory=dict)
 
 
@@ -93,6 +102,63 @@ async def create_figure(project: str, body: FigureCreate):
         raise HTTPException(status_code=400, detail=str(exc))
     await _notify({"type": "figure_updated", "project": project, "figure": body.name})
     return outcome
+
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+async def _save_upload(fdir: Path, upload: UploadFile) -> str:
+    name = Path(upload.filename or "data.csv").name
+    data = await upload.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="上传文件超过 10MB 限制")
+    updir = fdir / "uploads"
+    updir.mkdir(exist_ok=True)
+    (updir / name).write_bytes(data)
+    return name
+
+
+@app.post("/api/projects/{project}/figures/ai")
+async def create_figure_ai(project: str, name: str = Form(...),
+                           requirements: str = Form(...),
+                           data: UploadFile = File(...)):
+    try:
+        store.init_figure(project, name, origin="ai")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    upload_name = await _save_upload(store.figure_dir(project, name), data)
+    result = await run_workflow(
+        "create", store, project, name,
+        {"requirements": requirements, "upload_name": upload_name},
+    )
+    await _notify({"type": "figure_updated" if result.get("ok") else "render_error",
+                   "project": project, "figure": name})
+    return result
+
+
+@app.post("/api/projects/{project}/figures/adapt")
+async def adapt_figure(project: str, name: str = Form(...),
+                       requirements: str = Form(""),
+                       data: UploadFile = File(...),
+                       script: UploadFile = File(...)):
+    try:
+        store.init_figure(project, name, origin="adapt")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    fdir = store.figure_dir(project, name)
+    upload_name = await _save_upload(fdir, data)
+    script_bytes = await script.read()
+    if len(script_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="脚本超过 10MB 限制")
+    (fdir / "uploads" / Path(script.filename or "plot.py").name).write_bytes(script_bytes)
+    result = await run_workflow(
+        "adapt", store, project, name,
+        {"requirements": requirements, "upload_name": upload_name,
+         "script_text": script_bytes.decode("utf-8", errors="replace")},
+    )
+    await _notify({"type": "figure_updated" if result.get("ok") else "render_error",
+                   "project": project, "figure": name})
+    return result
 
 
 @app.get("/api/figure/{project}/{figure}")
@@ -200,18 +266,55 @@ async def snapshot(project: str, figure: str, body: SnapshotPost):
     return store.snapshot(project, figure, body.note)
 
 
-@app.post("/api/session/selection")
-async def post_selection(body: SelectionPost):
-    _figure_or_404(body.project, body.figure)
-    return session.save_selection(store, body.project, body.figure, body.selection)
+@app.post("/api/figure/{project}/{figure}/instruct")
+async def instruct(project: str, figure: str, body: InstructPost):
+    _figure_or_404(project, figure)
+    items = body.selection if isinstance(body.selection, list) else [body.selection]
+    enriched = [
+        enrich.enrich_selection(store, project, figure, item) for item in items
+    ]
+    result = await run_workflow(
+        "edit", store, project, figure,
+        {
+            "instruction": body.instruction,
+            "selection_json": json.dumps(enriched, ensure_ascii=False),
+            "code": store.read_code(project, figure),
+        },
+    )
+    await _notify({"type": "figure_updated" if result.get("ok") else "render_error",
+                   "project": project, "figure": figure})
+    return result
 
 
-@app.get("/api/session/selection")
-def get_selection(project: str | None = None, figure: str | None = None):
-    sel = session.get_selection(project, figure)
-    if sel is None:
-        return {"selection": None, "hint": "当前没有选区。在浏览器里点选或框选图形元素后，ZCode 可用 fa_get_selection 读取。"}
-    return {"selection": sel}
+@app.post("/api/figure/{project}/{figure}/writeback")
+async def writeback(project: str, figure: str):
+    _figure_or_404(project, figure)
+    result = await run_workflow("writeback", store, project, figure, {})
+    await _notify({"type": "figure_updated", "project": project, "figure": figure})
+    return result
+
+
+@app.post("/api/figure/{project}/{figure}/enrich-selection")
+async def enrich_selection_ep(project: str, figure: str, body: SelectionPost):
+    _figure_or_404(project, figure)
+    items = body.selection if isinstance(body.selection, list) else [body.selection]
+    enriched = [enrich.enrich_selection(store, project, figure, item) for item in items]
+    return enriched if isinstance(body.selection, list) else enriched[0]
+
+
+@app.get("/api/figure/{project}/{figure}/runs")
+def list_runs(project: str, figure: str):
+    _figure_or_404(project, figure)
+    path = store.figure_dir(project, figure) / "runs.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return list(reversed(out))
 
 
 @app.websocket("/ws")

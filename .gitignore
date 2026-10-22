@@ -9,6 +9,8 @@ __pycache__/
 workspace/**/base.svg
 workspace/**/final.svg
 workspace/**/.render-tmp.svg
+workspace/**/uploads/
+workspace/**/runs.jsonl
 
 # 前端
 web/node_modules/

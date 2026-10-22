@@ -1,4 +1,6 @@
-"""FastAPI 集成测试：REST 全流程 + 选区会话。"""
+"""FastAPI 集成测试：REST 全流程 + AI 工作流端点。"""
+
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,25 +40,6 @@ def test_full_flow(client):
     assert body["ok"] is False and body["errorLine"] == 1
     # 上一版仍在
     assert "fa:treatment-bar-0" in client.get("/api/figure/demo/bars").json()["baseSvg"]
-
-    # 选区会话
-    r = client.post(
-        "/api/session/selection",
-        json={
-            "project": "demo",
-            "figure": "bars",
-            "selection": {"id": "fa:treatment-bar-2"},
-        },
-    )
-    sel = r.json()
-    assert sel["elementId"] == "fa:treatment-bar-2"
-    assert sel["fingerprint"].startswith("p:")
-    assert sel["semanticPath"].endswith("fa:treatment-bar-2")
-    assert sel["nearby"]
-
-    # MCP 读取
-    got = client.get("/api/session/selection").json()["selection"]
-    assert got["fingerprint"].startswith("p:")
 
     # patch + 回写收敛
     patch = {"baseHash": "", "ops": [
@@ -104,23 +87,94 @@ def test_verify_after_code_writeback(client):
     assert v["cleared"] is True, v
 
 
-def test_multiselect_session(client):
-    """多选：POST 数组 → 每个元素各自富化；GET/f MCP 读到完整数组。"""
-    client.post("/api/projects/demo/figures", json={"name": "bars3", "template": "bar-groups"})
-    r = client.post(
-        "/api/session/selection",
-        json={
-            "project": "demo",
-            "figure": "bars3",
-            "selection": [{"id": "fa:treatment-bar-1"}, {"id": "fa:treatment-bar-2"}],
-        },
-    )
-    sel = r.json()
-    assert isinstance(sel, list) and len(sel) == 2
-    assert [s["elementId"] for s in sel] == ["fa:treatment-bar-1", "fa:treatment-bar-2"]
-    assert all(s["fingerprint"].startswith("p:") for s in sel)
-    # 两条 JSON 各自独立描述自己的元素，不能是第一条的克隆
-    assert sel[0]["semanticPath"] != sel[1]["semanticPath"]
+def _stub_routes(monkeypatch, routes):
+    from tests.test_ai_workflows import StubLLM
 
-    got = client.get("/api/session/selection").json()["selection"]
-    assert isinstance(got, list) and got[1]["elementId"] == "fa:treatment-bar-2"
+    stub = StubLLM(routes)
+    import figure_agent.ai.workflows as wf
+
+    monkeypatch.setattr(wf, "get_llm", lambda: stub)
+    return stub
+
+
+def test_ai_create_endpoint(client, monkeypatch):
+    import pathlib
+
+    iris = pathlib.Path(__file__).parent / "fixtures" / "iris.csv"
+    from tests.test_ai_workflows import GOOD_CODE, STD_REPLY
+
+    _stub_routes(monkeypatch, {
+        "数据标准化": [STD_REPLY],
+        "绘图代码生成器": [json.dumps({"code": GOOD_CODE, "notes": ""})],
+    })
+    r = client.post(
+        "/api/projects/demo/figures/ai",
+        data={"name": "ai-fig", "requirements": "散点图，按物种着色"},
+        files={"data": ("iris.csv", iris.read_bytes(), "text/csv")},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["kind"] == "create"
+    assert "fa:response-curve" in client.get("/api/figure/demo/ai-fig").json()["baseSvg"]
+    meta = client.get("/api/figure/demo/ai-fig").json()["meta"]
+    assert meta["origin"] == "ai"
+    runs = client.get("/api/figure/demo/ai-fig/runs").json()
+    assert runs[0]["kind"] == "create"
+
+
+def test_ai_create_duplicate_400(client):
+    client.post("/api/projects/demo/figures", json={"name": "bars", "template": "bar-groups"})
+    r = client.post(
+        "/api/projects/demo/figures/ai",
+        data={"name": "bars", "requirements": "x"},
+        files={"data": ("d.csv", b"a,b\n1,2\n", "text/csv")},
+    )
+    assert r.status_code == 400  # bars 已由模板建过
+
+
+def test_instruct_endpoint(client, monkeypatch):
+    client.post("/api/projects/demo/figures", json={"name": "bars", "template": "bar-groups"})
+    # stub 返回当前代码原样（demo/bars 是模板图、无 data.csv，
+    # 不能回读 data.csv 的 GOOD_CODE，否则渲染失败触发 fix 循环到超限）
+    code = client.get("/api/figure/demo/bars").json()["code"]
+    _stub_routes(monkeypatch, {
+        "绘图代码修改器": [json.dumps({"code": code, "notes": "已处理指令"})],
+    })
+    # semanticPath 为 svgkit 真实格式（root-first：figure_1/axes_1/<gid>）
+    sel = {"elementId": "fa:treatment-bar-1", "semanticPath": "figure_1/axes_1/fa:treatment-bar-1"}
+    r = client.post("/api/figure/demo/bars/instruct",
+                    json={"instruction": "把选中的柱子改红", "selection": sel})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # instruct 后图已重渲染
+    assert client.get("/api/figure/demo/bars").json()["baseSvg"]
+
+
+def test_writeback_endpoint(client, monkeypatch):
+    client.post("/api/projects/demo/figures", json={"name": "bars", "template": "bar-groups"})
+    code = client.get("/api/figure/demo/bars").json()["code"]
+    patched = code.replace('b.set_gid(f"fa:treatment-bar-{i}")',
+                           'b.set_gid(f"fa:treatment-bar-{i}"); b.set_color("#dd3322")')
+    _stub_routes(monkeypatch, {"微调回写器": [json.dumps({"code": patched, "notes": "改色"})]})
+    # 先造一个 active op
+    sel = {"elementId": "fa:treatment-bar-1", "semanticPath": "figure_1/axes_1/fa:treatment-bar-1"}
+    client.post("/api/figure/demo/bars/enrich-selection", json={"selection": sel})
+    patch = client.get("/api/figure/demo/bars").json()["patch"]
+    patch["ops"] = [{"id": "op-x", "kind": "set_style", "target": {"id": "fa:treatment-bar-1",
+                    "semanticPath": "figure_1/axes_1/fa:treatment-bar-1"},
+                    "attr": "fill", "value": "#dd3322", "intent": "处理组改红",
+                    "origin": "manual", "status": "active"}]
+    client.put("/api/figure/demo/bars/patch", json=patch)
+    r = client.post("/api/figure/demo/bars/writeback")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cleared"] is True and body["ok"] is True
+
+
+def test_enrich_selection_stateless(client):
+    client.post("/api/projects/demo/figures", json={"name": "bars", "template": "bar-groups"})
+    sel = {"elementId": "fa:treatment-bar-2", "semanticPath": "figure_1/axes_1/fa:treatment-bar-2"}
+    r = client.post("/api/figure/demo/bars/enrich-selection", json={"selection": sel})
+    body = r.json()
+    assert body["elementId"] == "fa:treatment-bar-2"
+    assert body["fingerprint"]
+    assert client.get("/api/session/selection").status_code == 404
