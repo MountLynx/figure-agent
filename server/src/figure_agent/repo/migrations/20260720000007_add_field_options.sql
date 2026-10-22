@@ -1,0 +1,1 @@
+ALTER TABLE fields ADD COLUMN options TEXT NOT NULL DEFAULT '[]';
