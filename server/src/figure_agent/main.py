@@ -326,7 +326,10 @@ def list_types():
 
 @app.post("/api/types")
 async def create_type(body: TypeCreate):
-    return repo_types.create_type(repo, body.name, body.icon)
+    try:
+        return repo_types.create_type(repo, body.name, body.icon)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.delete("/api/types/{type_id}")
@@ -458,7 +461,6 @@ async def adapt_figure(name: str = Form(...), requirements: str = Form(""),
 def get_figure(item_id: str):
     _fdir_or_404(item_id)
     item = _bind_fields(repo_items.get_item(repo, item_id))
-    assert item is not None
     base = {
         "id": item_id,
         "name": item["name"],
