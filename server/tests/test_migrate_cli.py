@@ -41,6 +41,7 @@ def test_migrate_moves_and_records(tmp_path):
     assert item is not None and item["name"] == "bars"
     assert item["properties"]["模板"] == "bar-groups"
     assert item["properties"]["最后渲染"] == "2026-01-02T00:00:00"
+    assert item["createdAt"] == "2026-01-01T00:00:00"  # 旧 meta 的创建时间透传
     assert item["groupIds"] == [
         g["id"] for g in repo_groups.list_groups(repo) if g["name"] == "demo"]
     # 目录已搬平，语义文件已清除

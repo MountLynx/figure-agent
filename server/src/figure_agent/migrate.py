@@ -47,7 +47,8 @@ def migrate_workspace(root: Path, archive: bool = False) -> Dict:
             if meta.get("template"):
                 props["模板"] = str(meta["template"])
             item = repo_items.create_item(repo, str(meta.get("name") or fdir.name),
-                                          FIGURE_TYPE_NAME, props)
+                                          FIGURE_TYPE_NAME, props,
+                                          created_at=meta.get("createdAt"))
             target = root / item["id"]
             shutil.move(str(fdir), str(target))
             repo_items.bind_group(repo, item["id"], group["id"])

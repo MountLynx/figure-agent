@@ -234,6 +234,10 @@ item_id, spec)`；`nodes.py` 七个工厂签名 `fdir = store.figure_dir(item_id
 
 图操作（内容管线，全部 id 寻址）：
 
+> 实现注记（计划阶段裁剪，2026-10-22）：表中 `PATCH /api/types/{id}`（类型改名/图标）
+> 与 `POST /api/figures/{id}/upload`（独立上传端点，上传已并入 `/api/figures/ai`、
+> `/adapt` 的 multipart）未实现；另增补 `GET /api/figures/{id}/files`（文件树）。
+
 | 方法 路径 | 说明 |
 |---|---|
 | GET `/api/figures/{id}` | 详情：item+code+baseSvg+finalSvg+patch+snapshots+renderError（懒渲染） |

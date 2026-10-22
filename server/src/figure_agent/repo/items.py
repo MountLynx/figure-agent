@@ -94,7 +94,9 @@ def list_items(repo: Repo, type_name: Optional[str] = None, q: Optional[str] = N
 
 
 def create_item(repo: Repo, name: str, type_name: str = FIGURE_TYPE,
-                properties: Optional[dict] = None) -> dict:
+                properties: Optional[dict] = None,
+                created_at: Optional[str] = None) -> dict:
+    """created_at：迁移场景透传旧 meta 的创建时间；缺省用当前时刻。"""
     with repo.conn() as c:
         trow = c.execute("SELECT id FROM item_types WHERE name = ?", (type_name,)).fetchone()
         if trow is None:
@@ -103,11 +105,11 @@ def create_item(repo: Repo, name: str, type_name: str = FIGURE_TYPE,
             item_id = generate_id()
             if c.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone() is None:
                 break
-        now = now_utc()
+        now = created_at or now_utc()
         c.execute(
             "INSERT INTO items (id, name, type_id, properties, namespace, created_at, updated_at)"
             " VALUES (?, ?, ?, ?, 'default', ?, ?)",
-            (item_id, name, trow["id"], json.dumps(properties or {}, ensure_ascii=False), now, now),
+            (item_id, name, trow["id"], json.dumps(properties or {}, ensure_ascii=False), now, now_utc()),
         )
     item = get_item(repo, item_id)
     assert item is not None
