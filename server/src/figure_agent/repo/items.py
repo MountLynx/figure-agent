@@ -40,6 +40,8 @@ def require_id(item_id: str) -> str:
 def _dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["properties"] = json.loads(d.get("properties") or "{}")
+    d["createdAt"] = d.pop("created_at", None)
+    d["updatedAt"] = d.pop("updated_at", None)
     return d
 
 

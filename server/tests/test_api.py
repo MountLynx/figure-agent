@@ -41,6 +41,7 @@ def test_full_flow(client):
 
     items = client.get("/api/items").json()
     assert items[0]["id"] == fid and items[0]["hasBase"] is True
+    assert items[0]["createdAt"] and items[0]["updatedAt"]
 
     fig = client.get(f"/api/figures/{fid}").json()
     assert "fa:treatment-bar-0" in fig["baseSvg"]
