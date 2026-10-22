@@ -98,7 +98,7 @@ export default function App() {
         if (data.type === "ai_run") {
           // AI run 事件不依赖当前选图（造图/改造可以在无选中图时发起），
           // 放在 early return 之前，保证 run_end 一定能复位 runActive。
-          setAiEvents((prev) => [...prev.slice(-199), { ...data, at: Date.now() }]);
+          setAiEvents((prev) => [...prev.slice(-199), { at: Date.now(), ...data }]);
           if (data.phase === "run_end") {
             setRunActive(false);
             const cur = stateRef.current.current;
@@ -126,6 +126,9 @@ export default function App() {
       ws = new WebSocket(`${proto}://${location.host}/ws`);
       ws.onopen = () => {
         setWsOnline(true);
+        // 兜底：WS 断连窗口可能丢 run_end 事件，重连时复位运行锁
+        //（此时上次 run 要么已结束，要么结果会经轮询/figure_updated 刷新）
+        setRunActive(false);
         if (poll) {
           window.clearInterval(poll);
           poll = null;
@@ -407,7 +410,7 @@ export default function App() {
                 setBusy(false);
               }
             }}
-            disabled={!current || busy}
+            disabled={!current || busy || runActive}
           >
             重渲染
           </button>
@@ -458,11 +461,16 @@ export default function App() {
         patchOpCount={detail?.patch.ops.length ?? 0}
         runEvents={aiEvents}
         runActive={runActive}
+        wsOnline={wsOnline}
         onRunStart={() => setRunActive(true)}
+        onRunEnd={() => setRunActive(false)}
         onFigureReady={(p, f) => selectFigure(p, f)}
         onFigureChanged={() => {
           refreshProjects();
-          if (current) loadFigure(current.project, current.figure, stateRef.current.dirty);
+          // 经 ref 取最新选图：run 中途切图后，旧闭包里的 current 会把旧图
+          // detail/ops 覆盖到新图上下文（再点保存就把旧图 ops 存进新图）
+          const cur = stateRef.current.current;
+          if (cur) loadFigure(cur.project, cur.figure, stateRef.current.dirty);
         }}
         showToast={showToast}
       />
@@ -476,7 +484,7 @@ export default function App() {
         lastVerify={lastVerify}
         snapshots={detail?.snapshots ?? []}
         code={detail?.code ?? null}
-        busy={busy}
+        busy={busy || runActive}
         elements={elements}
         onSelectElement={(path) => setSelectReq({ path, nonce: Date.now() })}
         onAddOps={addOps}

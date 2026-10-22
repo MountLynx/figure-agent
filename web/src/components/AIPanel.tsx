@@ -10,15 +10,17 @@ interface Props {
   patchOpCount: number;
   runEvents: RunEvent[];
   runActive: boolean;
+  wsOnline: boolean;
   onRunStart: () => void;
+  onRunEnd: () => void;
   onFigureReady: (project: string, figure: string) => void;
   onFigureChanged: () => void;
   showToast: (msg: string, error?: boolean) => void;
 }
 
 export function AIPanel(props: Props) {
-  const { projects, current, selections, patchOpCount, runEvents, runActive,
-          onRunStart, onFigureReady, onFigureChanged, showToast } = props;
+  const { projects, current, selections, patchOpCount, runEvents, runActive, wsOnline,
+          onRunStart, onRunEnd, onFigureReady, onFigureChanged, showToast } = props;
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [project, setProject] = useState("");
   const [name, setName] = useState("");
@@ -28,9 +30,16 @@ export function AIPanel(props: Props) {
   const [instruction, setInstruction] = useState("");
   const [showAdapt, setShowAdapt] = useState(false);
 
-  useEffect(() => {
+  // 取状态可复调：WS 重连（wsOnline 翻转）时重试——首次失败会永久停在"未配置"，
+  // 重连后再取一次可自愈。catch 时仍 setStatus（configured:false），UI 显示未配置但保留可重试。
+  const refreshStatus = () => {
     api.aiStatus().then(setStatus).catch(() => setStatus({ configured: false, provider: "", model: "", mock: false }));
-  }, []);
+  };
+
+  useEffect(() => {
+    refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsOnline]);
 
   useEffect(() => {
     if (!project && projects.length > 0) setProject(projects[0].name);
@@ -49,6 +58,9 @@ export function AIPanel(props: Props) {
       showToast(`造图失败：${(e as Error).message}`, true);
     } finally {
       onFigureChanged();
+      // fetch settle 即代表服务端 run 已结束（含 400 等未进 run_workflow 的早失败），
+      // 先于 WS run_end 复位无害且幂等；否则 WS 丢事件时面板永久锁死
+      onRunEnd();
     }
   };
 
@@ -63,6 +75,7 @@ export function AIPanel(props: Props) {
       showToast(`改造失败：${(e as Error).message}`, true);
     } finally {
       onFigureChanged();
+      onRunEnd();
     }
   };
 
@@ -77,6 +90,7 @@ export function AIPanel(props: Props) {
       showToast(`修改失败：${(e as Error).message}`, true);
     } finally {
       onFigureChanged();
+      onRunEnd();
     }
   };
 
@@ -93,6 +107,7 @@ export function AIPanel(props: Props) {
       showToast(`回写失败：${(e as Error).message}`, true);
     } finally {
       onFigureChanged();
+      onRunEnd();
     }
   };
 
