@@ -7,6 +7,7 @@ import { Viewer, type ElementNode } from "./components/Viewer";
 import { EditorPanel } from "./components/EditorPanel";
 import { AIPanel } from "./components/AIPanel";
 import { ManageView } from "./components/manage/ManageView";
+import DogfoodApp from "./shell-dogfood/DogfoodApp";
 import type { FigureDetail, Op, RunEvent, SelectionJSON, VerifyResponse } from "./types";
 
 interface HistoryEntry {
@@ -15,6 +16,12 @@ interface HistoryEntry {
 }
 
 export default function App() {
+  // ?view=shell：@index/shell-react 狗粮视图（其余入口不受影响）
+  if (new URLSearchParams(window.location.search).get("view") === "shell") return <DogfoodApp />;
+  return <IndexApp />;
+}
+
+function IndexApp() {
   const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
   if (!target) return <ManageView onOpen={(id, name) => setTarget({ id, name })} />;
   return <EditorApp target={target} onBack={() => setTarget(null)} />;
