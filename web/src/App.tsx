@@ -1,14 +1,17 @@
 // App：双视图编排。管理视图（Index 三栏）/ 编辑器视图（画布+AI+微调）。
 // 编辑器逻辑与旧版一致，仅寻址从 (project, figure) 改为 item id。
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, Suspense, lazy } from "react";
 import { api } from "./api";
 import { Viewer, type ElementNode } from "./components/Viewer";
 import { EditorPanel } from "./components/EditorPanel";
 import { AIPanel } from "./components/AIPanel";
 import { ManageView } from "./components/manage/ManageView";
-import DogfoodApp from "./shell-dogfood/DogfoodApp";
 import type { FigureDetail, Op, RunEvent, SelectionJSON, VerifyResponse } from "./types";
+
+// ?view=shell 才加载 shell 包（懒分片）：默认视图不背 shell 体积；分片执行时其
+// 模块级 setEngine/setPlatform 先于 AppShell 首次渲染完成
+const DogfoodApp = lazy(() => import("./shell-dogfood/DogfoodApp"));
 
 interface HistoryEntry {
   ops: Op[];
@@ -17,7 +20,13 @@ interface HistoryEntry {
 
 export default function App() {
   // ?view=shell：@index/shell-react 狗粮视图（其余入口不受影响）
-  if (new URLSearchParams(window.location.search).get("view") === "shell") return <DogfoodApp />;
+  if (new URLSearchParams(window.location.search).get("view") === "shell") {
+    return (
+      <Suspense fallback={null}>
+        <DogfoodApp />
+      </Suspense>
+    );
+  }
   return <IndexApp />;
 }
 

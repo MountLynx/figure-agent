@@ -2,7 +2,7 @@
 // 通过 ?view=shell 查询参数进入；挂载时自动打开服务端当前仓库
 // （仓库未打开前 AppShell 自身渲染 RepoDashboard）。
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { AppShell, setPlatform } from "@index/shell-react";
 import { setEngine } from "@index/stores/pure";
 import { useRepoStore } from "@index/stores-react";
@@ -13,7 +13,12 @@ setEngine(engineApi);
 setPlatform(platform);
 
 export default function DogfoodApp() {
+  // 自动开仓只跑一次：dev 下 StrictMode 会双调用 effect（mount→unmount→mount），
+  // ref 在两次调用间保留，避免 repo.info/openRepo 双请求
+  const startedRef = useRef(false);
   useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
     void (async () => {
       try {
         const info = await engineApi.repo.info();

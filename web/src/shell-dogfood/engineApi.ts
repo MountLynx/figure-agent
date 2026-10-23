@@ -19,13 +19,16 @@ import type { FieldInfo, FileInfo, GroupInfo, ItemInfo, TagInfo, TypeInfo } from
 
 async function json<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
-    let detail = resp.statusText;
+    let detail: unknown = resp.statusText;
     try {
-      detail = (await resp.json()).detail ?? detail;
+      const body = await resp.json();
+      detail = body.detail ?? detail;
     } catch {
       /* ignore */
     }
-    throw new Error(`${resp.status}: ${detail}`);
+    // FastAPI 校验错误的 detail 是数组，字符串化避免 "[object Object]"
+    const text = typeof detail === "string" ? detail : JSON.stringify(detail);
+    throw new Error(`${resp.status}: ${text}`);
   }
   return resp.json() as Promise<T>;
 }
@@ -68,6 +71,8 @@ function invalidateTypes() {
 
 // ---- 映射：figure-agent DTO → 协议对象 ----
 
+// 注意：未知 typeName 会伪装成第一个类型（静默串型的隐患）；当前 shell 侧只有
+// 受保护的 figure 单类型，此回退兜底可接受——新增可见类型时需重审
 function resolveTypeIdSync(typeName: string, types: TypeInfo[]): number {
   const found = types.find((t) => t.name === typeName);
   return found?.id ?? types[0]?.id ?? 0;
@@ -254,10 +259,11 @@ export const engineApi: EngineApi = {
 
     async listTree(groupId, tagId, typeIds, _filter) {
       const { ctx, infos, flat } = await loadDetailCtx();
-      // tagId 过滤走标签名（ItemInfo.tags 存名字）
-      const tagName = tagId != null ? ctx.tags.find((t) => t.id === tagId)?.name : undefined;
+      // tagId 过滤走标签名（ItemInfo.tags 存名字）；未知标签与未知分组一样大声失败
+      const tagInfo = tagId != null ? ctx.tags.find((t) => t.id === tagId) : null;
+      if (tagId != null && !tagInfo) throw new Error(`shell dogfood: 标签 ${tagId} 不存在`);
       const keep = typeFilter(typeIds, ctx.types);
-      const tagOk = (i: ItemInfo) => (tagId == null ? true : tagName != null && i.tags.includes(tagName));
+      const tagOk = (i: ItemInfo) => (tagInfo ? i.tags.includes(tagInfo.name) : true);
 
       // 以 groupId 为根的子树
       const tree = buildGroupTree(flat);
@@ -297,7 +303,8 @@ export const engineApi: EngineApi = {
         [...wantedIds].map(async (id) => {
           const info = byId.get(id);
           if (!info) return;
-          filesById.set(id, await fetchFiles(id));
+          // 单个条目缺图目录不应拖垮整个分组视图：退化为空文件树
+          filesById.set(id, await fetchFiles(id).catch(() => ({ name: "", is_dir: true, children: [] })));
         })
       );
       const detailOf = (id: string): ItemDetail | null => {
@@ -330,11 +337,13 @@ export const engineApi: EngineApi = {
     listSubRepos: async () => ({}),
 
     async create(typeId, name) {
+      // 服务端无模板时不渲染、返回 ok:false + 空 stderr，但条目已建（store.py）——
+      // 不能当失败抛，否则 NewItemDialog 无 catch + 条目已存在的重复数据陷阱
       const created = await post<{ id: string; name: string; ok: boolean; stderr: string }>("/api/items", {
         name,
         origin: "shell",
       });
-      if (!created.ok) throw new Error(created.stderr || `创建条目失败：${created.name}`);
+      if (!created.ok) console.warn(`shell dogfood: 条目 ${created.id} ok:false stderr=${created.stderr}`);
       // REST 不接收 type：按 id 回查列表解析 type_id，缺失时回退请求的 typeId / 首个类型
       const [infos, types] = await Promise.all([listInfos(null, null), loadTypes()]);
       const info = infos.find((i) => i.id === created.id);
@@ -351,9 +360,11 @@ export const engineApi: EngineApi = {
     },
 
     async update(id, name, properties) {
-      const body: { name?: string; properties?: Record<string, string> } = {};
+      // properties 原样透传（协议值允许非字符串，服务端 ItemPatch.properties 是裸
+      // dict，json.dumps 落库）——不在这里强行收窄成 Record<string, string>
+      const body: { name?: string; properties?: Record<string, unknown> } = {};
       if (name != null) body.name = name;
-      if (properties != null) body.properties = properties as Record<string, string>;
+      if (properties != null) body.properties = properties;
       const info = await patch<ItemInfo>(`/api/items/${id}`, body);
       return mapItem(info, await loadTypes());
     },
