@@ -15,7 +15,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import config, enrich
 from .ai.workflows import run_workflow
@@ -99,6 +99,11 @@ class BindBody(BaseModel):
 
 
 class StatePut(BaseModel):
+    # extra="allow"：shell 设置键（activePresetId、notes_enabled、
+    # create_folder_by_default、remember_last_type、locale…）原样透传落盘，
+    # 不再被未声明字段静默丢弃；theme 仍是唯一具名键
+    model_config = ConfigDict(extra="allow")
+
     theme: str | None = None
 
 
@@ -176,7 +181,10 @@ def get_state():
 
 @app.put("/api/repo/state")
 def put_state(body: StatePut):
-    return repo.write_state({k: v for k, v in body.model_dump().items() if v is not None})
+    # theme 沿用旧行为（None 不落盘）；extra 键原样透传，含 null（shell 依赖
+    # 显式 null 清除设置，如 setActivePreset(null)）
+    dumped = body.model_dump()
+    return repo.write_state({k: v for k, v in dumped.items() if k != "theme" or v is not None})
 
 
 # ---------------------------------------------------------------- 条目/管理语义
