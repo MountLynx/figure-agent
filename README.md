@@ -1,3 +1,11 @@
+> **⚠️ 已归档（2026-10-28）**：figure-agent 已整体并入
+> [ResearchIndex](../research%20manage)（统一科研工作台）——SVG 编辑器与四条 AI 工作流
+> 物理搬入 `server/src/researchindex/figures/` 子包，图内嵌 Data 条目文件夹，
+> 右键「创建图表」打开工作台；本仓库退役，仅作历史参考。
+> 迁移工具：ResearchIndex `server/scripts/migrate_figure_agent.py`
+> （本 workspace 的 3 张图已迁至 `E:\Index\Research`）。设计与偏差 D24-D29 见
+> ResearchIndex 仓库 `docs/superpowers/`。
+
 # figure-agent（科研图表绘制 Agent）
 
 本地 Web 应用：服务端内嵌 SpecModule 工作流，由 AI 编写/修改 matplotlib 代码产出科研图表；浏览器 AI 面板提交任务、实时查看事件时间线；框选/点选 SVG 元素把"改哪里"变成结构化数据回传给 AI；颜色/字号/位置/大小四项手动微调记录为 patch，代码重跑不丢失，并可用收敛式回写把 patch 翻译回代码。工作区是一个合法的 Index 仓库：管理语义（图/分组/标签/类型/字段、AI 审计、快照）全部在 `.index/index.db`（SQLite），文件系统只承载图内容，可被 Index 应用（itemmanage）直接打开。
