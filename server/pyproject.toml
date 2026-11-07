@@ -1,19 +1,23 @@
 [project]
 name = "figure-agent-server"
-version = "0.1.0"
-description = "figure-agent 本地服务：执行器、svgkit、REST API、会话"
+version = "0.2.0"
+description = "figure-agent 独立 figures 服务：只认一个目录，python -m figureagent 启动"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # Form/File 上传端点（建图/adapt）与 /ws 广播的运行时依赖
+    "python-multipart>=0.0.9",
+    "websockets>=12",
+    # figures 域：SVG 处理 / 渲染 / AI 数据标准化
     "lxml>=5.0",
     "matplotlib>=3.8",
-    "httpx>=0.27",
     "pandas>=2.0",
     "openpyxl>=3.1",
-    # LLM provider SDK（SpecModule 按 provider 选装；本仓库 config.json 用
-    # openai 兼容后端，属硬依赖。换 anthropic 后端时补装 anthropic）
+    "httpx>=0.27",
+    # LLM provider SDK（SpecModule 按 provider 选装；默认 openai 兼容后端）
     "openai>=1.0",
+    # 注：SpecModule（module_harness + llm）不在 PyPI，按 README 本地 editable 安装。
 ]
 
 [project.optional-dependencies]
@@ -24,7 +28,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/figure_agent"]
+packages = ["src/figureagent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,1 +1,0 @@
-ALTER TABLE fields ADD COLUMN icon TEXT NOT NULL DEFAULT 'circle';

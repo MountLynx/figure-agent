@@ -1,4 +1,7 @@
-"""ai.nodes：script 节点纯逻辑单测（假 view）。"""
+"""ai.nodes：script 节点纯逻辑单测（假 view）。
+
+独立服务化后没有 item_id：节点只绑定一个 FigureStore / 一个目录。
+"""
 
 from __future__ import annotations
 
@@ -7,8 +10,7 @@ import json
 
 import pytest
 
-from figure_agent.ai import nodes
-from figure_agent.store import Store
+from figureagent.figures.ai import nodes
 
 
 class FakeView:
@@ -31,14 +33,12 @@ class FakeView:
 
 CSV_TEXT = "dose,response\n0,1.1\n5,2.3\n10,3.9\n"
 PROFILE = {"shape": [3, 2], "columns": [{"name": "dose", "dtype": "number", "unit": "", "desc": "剂量"}], "notes": "剂量响应"}
-
-
-def _make_store_fig(tmp_path):
-    """Store 建图（AI origin：无 plot.py），返回 (store, item_id, fdir)。"""
-    ws = tmp_path / "ws"
-    store = Store(ws)
-    fid = store.create_figure("f", origin="ai")["id"]
-    return store, fid, store.figure_dir(fid)
+GOOD = (
+    "import matplotlib\nmatplotlib.use('Agg')\n"
+    "import matplotlib.pyplot as plt\n"
+    "fig, ax = plt.subplots(figsize=(4, 3))\n"
+    "ax.plot([0, 1], [0, 1])\nfig.tight_layout()\n"
+)
 
 
 def test_parse_upload_csv(tmp_path):
@@ -75,26 +75,22 @@ def test_write_data(tmp_path):
     assert profile == {**PROFILE, "notes": "剂量响应 已规范"}
 
 
-def test_render_validate_first_pass_renders_and_counts(tmp_path):
+def test_render_validate_first_pass_renders_and_counts(fig_store):
     """首轮（无 fix）用 gen 的代码；写盘渲染计数；返回值带 code。"""
-    store, fid, fdir = _make_store_fig(tmp_path)
-    good = (
-        "import matplotlib\nmatplotlib.use('Agg')\n"
-        "import matplotlib.pyplot as plt\n"
-        "fig, ax = plt.subplots(figsize=(4, 3))\n"
-        "ax.plot([0, 1], [0, 1])\nfig.tight_layout()\n"
-    )
-    fn = nodes.make_render_validate(store, fid)
-    out = asyncio.run(fn(FakeView(fields={"gen": {"code": good}})))
+    store, workdir = fig_store
+    fdir = store.figure_dir()
+    fn = nodes.make_render_validate(store)
+    out = asyncio.run(fn(FakeView(fields={"gen": {"code": GOOD}})))
     assert out["ok"] is True and out["rounds"] == 1 and out["source"] == "gen"
-    assert out["code"] == good              # fix 循环的修复器要靠它拿当前代码
+    assert out["code"] == GOOD              # fix 循环的修复器要靠它拿当前代码
     assert "ax.plot" in (fdir / "plot.py").read_text(encoding="utf-8")
+    assert workdir.has_figure() is True
 
 
-def test_render_validate_prefers_fix_and_loop_limit(tmp_path):
-    store, fid, fdir = _make_store_fig(tmp_path)
+def test_render_validate_prefers_fix_and_loop_limit(fig_store):
+    store, workdir = fig_store
     bad = "fig = 1 +\n"
-    fn = nodes.make_render_validate(store, fid)
+    fn = nodes.make_render_validate(store)
     view = FakeView(fields={"gen": {"code": bad}, "fix": {"code": bad}})
     out1 = asyncio.run(fn(view))
     assert out1["ok"] is False and out1["source"] == "fix" and out1["rounds"] == 1
@@ -104,9 +100,9 @@ def test_render_validate_prefers_fix_and_loop_limit(tmp_path):
     assert nodes.settled(FakeView(output=out2)) is False
 
 
-def test_render_validate_no_code(tmp_path):
-    store, fid, fdir = _make_store_fig(tmp_path)
-    fn = nodes.make_render_validate(store, fid)
+def test_render_validate_no_code(fig_store):
+    store, workdir = fig_store
+    fn = nodes.make_render_validate(store)
     out = asyncio.run(fn(FakeView(fields={})))
     assert out["ok"] is False and "未产出代码" in out["stderr"] and out["code"] == ""
 
@@ -120,15 +116,16 @@ def test_guards_xor():
     assert not nodes.needs_fix(FakeView(output=fail3)) and nodes.settled(FakeView(output=fail3))
 
 
-def test_writeback_nodes(tmp_path):
-    store, fid, fdir = _make_store_fig(tmp_path)
-    store.save_patch(fid, {
+def test_writeback_nodes(fig_store):
+    store, workdir = fig_store
+    fdir = store.figure_dir()
+    store.save_patch({
         "baseHash": "",
         "ops": [{"id": "op-1", "kind": "set_style", "target": {"id": "fa:title"},
                  "attr": "font-size", "value": "18", "intent": "标题变大", "origin": "manual",
                  "status": "active"}],
     })
-    rp = nodes.make_read_patch(store, fid)
+    rp = nodes.make_read_patch(store)
     seed = rp(FakeView())
     assert len(seed["ops"]) == 1
 
@@ -156,29 +153,29 @@ def test_writeback_nodes(tmp_path):
     assert nodes.wb_done(FakeView(output=m4)) is True
 
 
-def test_finalize_writes_fa_runs(tmp_path):
-    store, fid, fdir = _make_store_fig(tmp_path)
-    fn = nodes.make_finalize(store, fid, "create")
+def test_finalize_writes_runs_jsonl(fig_store):
+    store, workdir = fig_store
+    fn = nodes.make_finalize(store, "create")
     result = fn(FakeView(fields={"result": {"ok": True, "rounds": 2, "stderr": "", "notes": "done"}}))
     assert result["kind"] == "create" and result["ok"] is True
-    from figure_agent.repo import runs as repo_runs
-
-    runs = repo_runs.list_runs(store.repo, fid)
+    runs = store.list_runs()
     assert len(runs) == 1 and runs[0]["kind"] == "create"
     assert runs[0]["ok"] is True and runs[0]["notes"] == "done"
-    assert not (fdir / "runs.jsonl").exists()  # 审计已进 SQL
+    assert workdir.runs_path().is_file()            # 审计落在 history/runs.jsonl
+    assert not (workdir.root / ".index").exists()   # 不再有 SQL 账本
 
-    fn_wb = nodes.make_finalize(store, fid, "writeback")
-    r2 = fn_wb(FakeView(fields={"result": {"cleared": False, "rounds": 3, "remaining": 1, "stderr": "", "ok": True}}))
+    fn_wb = nodes.make_finalize(store, "writeback")
+    r2 = fn_wb(FakeView(fields={"result": {"cleared": False, "rounds": 3, "remaining": 1,
+                                          "stderr": "", "ok": True}}))
     assert r2["ok"] is False  # writeback 的 ok = cleared
 
 
-def test_render_validate_tolerates_missing_sentinel(tmp_path):
+def test_render_validate_tolerates_missing_sentinel(fig_store):
     """真实引擎未点火 producer 返回 tickflow Missing（非 KeyError）——isinstance 防御须兜住。"""
     from tickflow.views import Missing
 
-    store, fid, fdir = _make_store_fig(tmp_path)
-    fn = nodes.make_render_validate(store, fid)
+    store, workdir = fig_store
+    fn = nodes.make_render_validate(store)
     out = asyncio.run(fn(FakeView(fields={"gen": {"code": ""}, "fix": Missing})))
     # fix 为 Missing（非 dict）→ 走 gen；gen.code 为空串 → 视为无代码
     assert out["ok"] is False and out["source"] == "gen" and "未产出代码" in out["stderr"]

@@ -1,9 +1,12 @@
 # AGENTS.md — figure-agent 绘图代码约定
 
-本仓库包含 figure-agent：本地 Web 应用。AI 能力由服务端内嵌的 SpecModule
-工作流提供（server/src/figure_agent/ai/），不依赖外部 coding agent / MCP。
-工作区是一个合法的 Index 仓库：管理语义在 `.index/index.db`（SQL），文件
-系统只承载图内容（存储契约见下文「面向开发的约定」）。
+本仓库是**独立的本地 web 应用**：服务端在**一个工作目录**里画图（matplotlib → SVG），
+浏览器端做选区微调与 AI 工作流；不管理项目、不碰任何数据库。它通常被 Index 宿主以
+iframe 形式嵌进中间页签（Index 管条目/类型/分组，fig 只管目录里的图）。
+
+- 服务入口：`python -m figureagent --dir <绝对路径>`（托管 `web/dist` + `/api/*` + `/ws`）
+- 设计：`docs/specs/2026-11-07-standalone-view-spec.md`
+- 代码位置：`server/src/figureagent/`（Python）、`web/src/`（React）
 
 ## 面向人的约定（手写 plot.py 时）
 
@@ -15,7 +18,7 @@
 
 ### gid 约定（最重要）
 对每个"用户可能想单独选中/修改"的 artist 调 `set_gid("fa:名字")`（示例与
-细则见 `server/src/figure_agent/ai/prompts.py` 的 GID_CONVENTION）。
+细则见 `server/src/figureagent/figures/ai/prompts.py` 的 GID_CONVENTION）。
 命名建议 `fa:<语义>-<序号>`，如 `fa:treatment-bar-2`、`fa:y-label`、`fa:title`。
 没有 fa: gid 的元素只能靠脆弱的自动 id（patch_3、text_1，重渲染后会漂移）匹配。
 
@@ -25,30 +28,41 @@ Microsoft YaHei / Noto Sans CJK SC，避免运行时与浏览器渲染漂移过�
 
 ## 面向开发的约定
 
-### 存储契约（Index 仓库模式）
+### 存储契约（单目录）
 
-- 工作区 = Index 仓库根：`.index/index.db`（SQLite）+ 仓库根下扁平
-  `<12hex>/` 条目文件夹（plot.py/data.csv/base.svg/final.svg/patch.json/
-  uploads/history/）；`meta.json` / `runs.jsonl` 已废除，管理语义在 SQL
-  （items.properties 的 模板/来源/最后渲染、fa_runs、fa_snapshots）。
-  契约来源：`docs/specs/2026-10-22-index-repo-refactor-design.md`。
-- 存储分层铁律：`figure_agent/repo/` 只碰 SQL（Index 的 7 张表**永不
-  ALTER**、fa_* 表走独立账本 `fa_schema_migrations`、**绝不写
-  `_sqlx_migrations`**）；文件系统只承载内容（plot.py/svg/patch/
-  history/uploads）。
-- `server/src/figure_agent/repo/migrations/*.sql` 是 Index 原版迁移的
-  字节级副本（`.gitattributes` 锁 LF），**禁止编辑**；checksum 守护测试
-  在 `tests/test_repo_migrations.py`。
-- API 与 AI 工作流以 item_id（12hex）寻址；旧 (project, figure) 寻址
-  已废除。
+- 唯一输入是 `--dir` 指定的**一个目录**；服务启动即绑定，**请求里的 `?dir=` 在绑定后
+  被忽略**（防止任意页面把服务指向别的目录）。换目录 = 换进程。
+- 目录内容固定：`plot.py`（真相源）`data.csv` `data_profile.json` `base.svg`
+  `final.svg` `patch.json` `uploads/` `history/`（`history/runs.jsonl` 记运行审计，
+  `history/<ts>/` 是快照）。
+- **不碰任何 SQLite**：没有条目、没有 types/items、没有图扩展表。`是否有图` 由
+  `Workdir.has_figure()`（`plot.py` 是否存在）判定，Index 侧自行看文件。
+- 路径一律经 `safe_path(root, rel)`；保留名（`RESERVED_NAMES`/`RESERVED_DIRS`）只用于
+  建图门禁，不做 files 域守护（没有 files 域）。
+
+### API 契约
+
+- `GET /api/context` → `{dir, name, has_figure}`；`GET /api/files` → 工作目录只读树
+  （`POST /api/files/list` 是同一接口的旧别名，body 里的 `itemId` 忽略）。
+- 图端点保持 `/api/figures/{figure_id}/...` 形状，但 **`{figure_id}` 段被忽略**
+  （单工作目录模型）；同时提供不带该段的同义路由。前端统一用字面量 `work`。
+- WS `/ws` 事件带 `dir` 字段（与 `/api/context` 同值）；没有 item id 语义。
+- 就绪握手：stdout 打印 `FIG_SERVICE_PORT=<port>` 与 `FIG_SERVICE_READY`（宿主依赖它）。
 
 ### AI 工作流与配置
 
-- AI 工作流的 prompt 与契约文本唯一来源是 `server/src/figure_agent/ai/prompts.py`；
+- prompt 与契约文本唯一来源是 `server/src/figureagent/figures/ai/prompts.py`；
   改契约先改那里，本文件与它保持一致。
 - 四条工作流（create 造图 / adapt 改造脚本 / edit 选区改图 / writeback 回写）
-  是固定 tasklist，见 `server/src/figure_agent/ai/workflows.py`；改流程须同步其测试。
-- LLM 配置：仓库根 `config.json` + `.env`（参考 `config.example.json`）；
-  `FIGURE_AGENT_MOCK=1` 免 key 冒烟。
-- 手动微调（patch）回写：在浏览器里做微调后，点 AI 面板的"回写 patch"，
-  服务端循环翻译进代码直至收敛清空。
+  是固定 tasklist，见 `figures/ai/workflows.py`；改流程须同步其测试。
+- LLM 配置：`$FIGUREAGENT_HOME`（默认 `~/.figureagent`）下的 `config.json` + `.env`；
+  `FIGUREAGENT_MOCK=1` 免 key 冒烟（兼容旧名 `FIGURE_AGENT_MOCK` / `RI_FIGURE_MOCK`）。
+- 手动微调（patch）回写：浏览器里微调后点 AI 面板的"回写 patch"，服务端循环翻译进
+  代码直至收敛清空。
+
+### 测试
+
+```bash
+cd server && PYTHONPATH=src <venv-python> -m pytest tests -q   # 122 用例
+cd web   && pnpm test && pnpm build                            # vitest + dist
+```

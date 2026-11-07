@@ -1,1 +1,0 @@
-ALTER TABLE groups ADD COLUMN bound_item_id TEXT REFERENCES items(id) ON DELETE SET NULL;

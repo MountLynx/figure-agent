@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from figure_agent.ai import prompts
+from figureagent.figures.ai import prompts
 
 EXPECT = {
     "STANDARDIZE_CORE": {"data"},
